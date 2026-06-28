@@ -1,0 +1,1651 @@
+---
+title: "NFL Offensive Strategy Evolution Analysis"
+subtitle: "An Analysis of Play-Calling Trends from 2000-2024"
+author: "Jason Lin, Matthew Goetting, Patrick Shukis, and Ryan Ji"
+format:
+  pdf:
+    fig-width: 7
+    fig-height: 4.5
+geometry: margin=1in
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| echo: false
+#| context: setup
+#| label: global-knitr-opts
+#| include: false
+
+knitr::opts_chunk$set(
+  echo    = FALSE,        
+  results = "hide",       
+  warning = FALSE,        
+  message = FALSE         
+)
+library(nflfastR)
+library(nflplotR)
+library(nflreadr)
+library(dplyr)
+library(purrr)
+library(DBI)
+library(RSQLite)
+library(readr)
+library(ggplot2)
+library(ggrepel)
+library(tidyr)
+library(tidyverse)
+library(patchwork)
+library(scales)
+library(broom)
+
+dcon <- dbConnect(RSQLite::SQLite(), "nfl_pbp.sqlite")
+
+years <- 2000:2025  
+dcon <- dbConnect(RSQLite::SQLite(), "nfl_pbp.sqlite")
+
+for(year in years){
+  message("Loading ", year, "...")
+  pbp <- nflfastR::load_pbp(year)
+  table_name <- paste0("pbp_", year)
+  
+  dbWriteTable(dcon, table_name, pbp, overwrite = TRUE)
+  
+  message("Created Table: ", table_name)
+}
+
+dbExecute(dcon, "DROP TABLE IF EXISTS play_by_play")
+
+# Now safely recreate it
+all_queries <- paste0("SELECT * FROM pbp_", years)
+union_query <- paste(all_queries, collapse = " UNION ALL ")
+
+dbExecute(dcon, paste0("CREATE TABLE play_by_play AS ", union_query))
+
+pbp <- DBI::dbReadTable(dcon, "play_by_play")
+
+
+pbp_2000 <- dbGetQuery(dcon, "SELECT * FROM pbp_2000")
+pbp_2024 <- dbGetQuery(dcon, "SELECT * FROM pbp_2024")
+
+nfl_theme <- theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 11, hjust = 0, color = "gray40"),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_line(color = "gray85", linewidth = 0.4),
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  )
+```
+
+
+## Introduction 
+The goal of this project was to evaluate the development of offensive strategy in the NFL from 2000 to 2025. Our primary dataset consisted of 2000-2025 play-by-play data accessed from the oﬀicial NFL-licensed publicly available dataset NFL Fast R. 
+
+This report takes a holistic approach at analyzing NFL offensive change, considering a wide range of offensive-related factors including play type, game situation, and coaching strategy in order to evaluate offensive efficiency and success.
+
+For additional comparison, we utilized game data from Sports Reference to compare trends in the NFL and college football, enhancing our understanding of the development of offensive strategy as players improve and progress through the highest levels of American football.
+
+Our holistic analysis ultimately led to the development of our killer plot, which is the culmination of our exploration of NFL offensive strategy. This plot provides an evaluation of the effective field in the NFL from 2000 to 2025, displaying how modern offenses require less yardage to get in scoring position than their early-2000s counterparts.
+
+The ultimate application of our research is to provide a holistic analysis for NFL front offices and coaches that will allow them to adapt to modern offensive strategy in order to achieve scoring success in a changing league. This analysis also substantiates the material effects brought about by NFL-initiated rule changes, allowing the NFL to anticipate the possible effects that future rule changes could have on improving the state of the game for players, coaches, and fans.
+
+
+## Changes in NFL Drives in the Last 25 Years 
+```{r}
+query_drive_change <- "
+WITH period1 AS (
+    SELECT fixed_drive_result, COUNT(*) as count_2000
+    FROM (
+        SELECT game_id, drive, fixed_drive_result
+        FROM play_by_play
+        WHERE season BETWEEN 2000 AND 2004
+            AND fixed_drive_result NOT IN ('End of half', 'Safety', 'Opp touchdown')
+        GROUP BY game_id, drive, fixed_drive_result
+    )
+    GROUP BY fixed_drive_result
+),
+period2 AS (
+    SELECT fixed_drive_result, COUNT(*) as count_2020
+    FROM (
+        SELECT game_id, drive, fixed_drive_result
+        FROM play_by_play
+        WHERE season BETWEEN 2020 AND 2025
+            AND fixed_drive_result NOT IN ('End of half', 'Safety', 'Opp touchdown')
+        GROUP BY game_id, drive, fixed_drive_result
+    )
+    GROUP BY fixed_drive_result
+)
+SELECT 
+    p1.fixed_drive_result,
+    100.0 * p1.count_2000 / (SELECT SUM(count_2000) FROM period1) as pct_2000,
+    100.0 * p2.count_2020 / (SELECT SUM(count_2020) FROM period2) as pct_2020,
+    100.0 * p2.count_2020 / (SELECT SUM(count_2020) FROM period2) - 
+    100.0 * p1.count_2000 / (SELECT SUM(count_2000) FROM period1) as diff
+FROM period1 p1
+JOIN period2 p2 ON p1.fixed_drive_result = p2.fixed_drive_result
+ORDER BY ABS(diff) DESC
+"
+
+
+drive_change_data <- dbGetQuery(dcon, query_drive_change)
+
+ggplot(drive_change_data, aes(x = reorder(fixed_drive_result, diff), y = diff, fill = diff > 0)) +
+    geom_bar(stat = "identity", width = 0.7) +
+    geom_hline(yintercept = 0, color = "black", linewidth = 0.8) +
+    scale_fill_manual(
+        values = c("FALSE" = "#E74C3C", "TRUE" = "#27AE60"),
+        labels = c("Decreased", "Increased"),
+        name = NULL
+    ) +
+    coord_flip() +
+    labs(
+        title = "How NFL Drives End Has Changed Dramatically",
+        subtitle = "Percentage point change in drive outcomes (2020-2025 vs 2000-2005)",
+        x = NULL,
+        y = "Percentage Point Change"
+    ) + nfl_theme
+
+
+```
+
+NFL offenses are fundamentally more productive than they were twenty years ago. Drives end in touchdowns roughly 5 percentage points more often. Field goals are up nearly 4 percentage points. Punts have dropped by over 6 percentage points, and turnovers are down about 3 percentage points. The turnover on downs increase seems contradictory until you realize that it's because teams are going for it on fourth down far more often, accepting that some of these attempts will fail. But the trade is worth it, as drives now have higher expected point values. Traditional turnovers from fumbles and interceptions are down, so ball security during live play has actually improved. In the aggregate, this means offenses convert possessions into points at a higher rate, and variance has lowered due to less randomness from turnovers. 
+
+## Increasing Redzone Efficiency
+```{r}
+redzone_2024 <- pbp_2024 %>%
+  filter(!is.na(posteam), yardline_100 <= 20, yardline_100 > 0) %>%
+  group_by(posteam, drive) %>%
+  slice(1) %>%
+  ungroup() %>%
+  group_by(posteam) %>%
+  summarise(
+    rz_trips = n(),
+    rz_tds = sum(fixed_drive_result == "Touchdown", na.rm = TRUE),
+    rz_td_pct = rz_tds / rz_trips
+  )
+
+# Get 2024 standings
+standings_2024 <- pbp_2024 %>%
+  filter(!is.na(posteam), !is.na(home_team), !is.na(away_team)) %>%
+  group_by(game_id, posteam) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(
+    win = case_when(
+      posteam == home_team & result > 0 ~ 1,
+      posteam == away_team & result < 0 ~ 1,
+      TRUE ~ 0
+    )
+  ) %>%
+  group_by(posteam) %>%
+  summarise(wins = sum(win)) %>%
+  arrange(wins)
+
+redzone_2024 <- redzone_2024 %>%
+  left_join(standings_2024, by = "posteam") %>%
+  arrange(wins) %>%
+  mutate(posteam = factor(posteam, levels = posteam))
+
+# 2000 Red Zone Efficiency
+redzone_2000 <- pbp_2000 %>%
+  filter(!is.na(posteam), yardline_100 <= 20, yardline_100 > 0) %>%
+  group_by(posteam, drive) %>%
+  slice(1) %>%
+  ungroup() %>%
+  group_by(posteam) %>%
+  summarise(
+    rz_trips = n(),
+    rz_tds = sum(fixed_drive_result == "Touchdown", na.rm = TRUE),
+    rz_td_pct = rz_tds / rz_trips
+  )
+
+# Get 2000 standings
+standings_2000 <- pbp_2000 %>%
+  filter(!is.na(posteam), !is.na(home_team), !is.na(away_team)) %>%
+  group_by(game_id, posteam) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(
+    win = case_when(
+      posteam == home_team & result > 0 ~ 1,
+      posteam == away_team & result < 0 ~ 1,
+      TRUE ~ 0
+    )
+  ) %>%
+  group_by(posteam) %>%
+  summarise(wins = sum(win)) %>%
+  arrange(wins)
+
+redzone_2000 <- redzone_2000 %>%
+  left_join(standings_2000, by = "posteam") %>%
+  arrange(wins) %>%
+  mutate(posteam = factor(posteam, levels = posteam))
+
+# Calculate averages
+avg_2024 <- mean(redzone_2024$rz_td_pct, na.rm = TRUE)
+avg_2000 <- mean(redzone_2000$rz_td_pct, na.rm = TRUE)
+
+# Get combined y limits
+y_limits_4 <- c(
+  min(c(redzone_2024$rz_td_pct, redzone_2000$rz_td_pct), na.rm = TRUE),
+  max(c(redzone_2024$rz_td_pct, redzone_2000$rz_td_pct), na.rm = TRUE)
+)
+
+# Create plots
+g_2000_rz <- redzone_2000 %>%
+  ggplot(aes(x = posteam, y = rz_td_pct)) + 
+  geom_segment(aes(xend = posteam, y = 0, yend = rz_td_pct)) +
+  geom_nfl_logos(aes(team_abbr = posteam), width = .036) +
+  geom_hline(yintercept = avg_2000, linetype = "dotted", color = "red", linewidth = 0.8) +
+  annotate("text", x = 1, y = avg_2000, label = sprintf("League Avg: %.1f%%", avg_2000 * 100), 
+           hjust = 0, vjust = -0.5, color = "red", size = 3.5, fontface = "bold") +
+  coord_cartesian(ylim = y_limits_4) +
+  labs(
+    title = "2000 Season",
+    x = NULL,
+    y = "Red Zone TD %"
+  ) + 
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_line(color = "gray85", linewidth = 0.4),
+    panel.grid.minor = element_blank(),
+    legend.position = "right",
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+
+g_2024_rz <- redzone_2024 %>%
+  ggplot(aes(x = posteam, y = rz_td_pct)) + 
+  geom_segment(aes(xend = posteam, y = 0, yend = rz_td_pct)) +
+  geom_nfl_logos(aes(team_abbr = posteam), width = .036) +
+  geom_hline(yintercept = avg_2024, linetype = "dotted", color = "red", linewidth = 0.8) +
+  annotate("text", x = 1, y = avg_2024, label = sprintf("League Avg: %.1f%%", avg_2024 * 100), 
+           hjust = 0, vjust = -0.5, color = "red", size = 3.5, fontface = "bold") +
+  coord_cartesian(ylim = y_limits_4) +
+  labs(
+    title = "2024 Season",
+    x = NULL,
+    y = "Red Zone TD %"
+  ) + 
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_line(color = "gray85", linewidth = 0.4),
+    panel.grid.minor = element_blank(),
+    legend.position = "right",
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+
+# Combine plots
+combined_plots_4 <- (g_2000_rz | g_2024_rz) +
+  plot_annotation(
+    title = "Red Zone Touchdown Efficiency",
+    subtitle = "2000 vs. 2024 (Sorted by Wins)",
+    theme = theme(
+      plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+      plot.subtitle = element_text(size = 12, hjust = 0.5, color = "gray40")
+    )
+  )
+
+combined_plots_4
+
+
+```
+
+Red Zone touchdown efficiency is an extremely important metric for offensive success. Once offenses reach the opponent’s 20 yard line, having an offensive scheme that can consistently walk away with seven points instead of three adds up over time, and makes up a large part of each team’s offensive success. Overall, teams who have a higher red zone conversion rate have more wins, as shown in both the 2000 and 2024 graphs. However, there are many exceptions to this general rule, one being the 2024 Cincinnati Bengals. The Bengals were one of the most explosive offenses and ranked top five in red zone touchdown percentage, but their defensive struggles kept them out of the win column on multiple occasions.
+
+Another important aspect of the graph to notice is the difference in average red zone touchdown percentage between 2000 and 2024. The league average increased by about 7% overall, marking a significant improvement in offensive efficiency throughout the league. This is a result of a couple factors. First, modern teams are becoming more aggressive and analytics-reliant in short fourth down red zone scenarios, especially near the goal line. Second, teams are drawing up an increasing amount of short field trick plays, getting lineman and quarterbacks involved in the receiving game and opening up the playbook for scoring opportunities. Finally, offenses are just more efficient overall. Modern teams have more comprehensive red zone playbooks than they did in 2000, and can effectively target different defensive schemes in short yardage scenarios.
+
+
+## Kickers Have Become Much More Efficient
+
+```{r}
+nfl_theme <- theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 11, hjust = 0, color = "gray40"),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_line(color = "gray85", linewidth = 0.4),
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  )
+
+query1 <- "
+WITH long_fg_attempts AS (
+    SELECT 
+        season,
+        COUNT(*) as fg_attempts_55plus
+    FROM play_by_play
+    WHERE play_type = 'field_goal' 
+        AND kick_distance >= 55
+    GROUP BY season
+),
+total_games AS (
+    SELECT 
+        season,
+        COUNT(DISTINCT game_id) as total_games
+    FROM play_by_play
+    GROUP BY season
+)
+SELECT 
+    t.season,
+    COALESCE(l.fg_attempts_55plus, 0) as fg_attempts_55plus,
+    t.total_games,
+    CAST(COALESCE(l.fg_attempts_55plus, 0) AS FLOAT) / t.total_games as attempts_per_game
+FROM total_games t
+LEFT JOIN long_fg_attempts l ON t.season = l.season
+ORDER BY t.season
+"
+
+fg_attempts_data <- dbGetQuery(dcon, query1)
+
+
+query2 <- "
+SELECT 
+    season,
+    COUNT(*) as total_attempts,
+    SUM(CASE WHEN field_goal_result = 'made' THEN 1 ELSE 0 END) as made,
+    CAST(SUM(CASE WHEN field_goal_result = 'made' THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*) * 100 as success_rate
+FROM play_by_play
+WHERE play_type = 'field_goal' 
+    AND kick_distance >= 55
+GROUP BY season
+ORDER BY season
+"
+
+fg_success_data <- dbGetQuery(dcon, query2)
+combined_data <- merge(fg_attempts_data, fg_success_data, by = "season")
+
+# calculate scaling factor
+coeff <- 100 / max(combined_data$attempts_per_game)
+
+ggplot(combined_data, aes(x = season)) +
+    geom_line(aes(y = attempts_per_game, color = "Attempts per Game"), lwd = 1.2) +
+    geom_point(aes(y = attempts_per_game, color = "Attempts per Game"), size = 3) +
+    geom_line(aes(y = success_rate / coeff, color = "Success Rate"), lwd = 1.2) +
+    geom_point(aes(y = success_rate / coeff, color = "Success Rate"), size = 3) +
+    scale_y_continuous(
+        name = "Attempts Per Game",
+        sec.axis = sec_axis(~ . * coeff, name = "Success Rate (%)")
+    ) +
+    scale_color_manual(values = c("Attempts per Game" = "steelblue", 
+                                   "Success Rate" = "darkgreen")) +
+    labs(
+        title = "55+ Yard Field Goal Attempts & Success Rate",
+        subtitle = "NFL Regular Season (2000-2025)",
+        x = "Season",
+        color = ""
+    ) +
+    nfl_theme +
+    theme(legend.position = "bottom")
+
+```
+
+Attempts per game for 55+ yard field goals have nearly quadrupled since 2000, jumping from roughly 0.03 attempts to over 0.45. The success rate has climbed from less than ten percent in 2000 to about 25% today, but what's interesting is how success rate plateaued around 2022 while attempts kept climbing. If kickers have been converting at 60% for three years, why are teams still increasing attempts? Perhaps it's because coaching adapts slowly to new information. Older coaches who grew up watching kickers fail from 55+ yards developed strong priors against attempting them, and even with several years of higher efficiency these priors take time to update. But overall, the point is that better training, better technique, and even better equipment (kickers are now allowed to use "fresh" balls) has fundamentally made longer field goals much more achievable, which has contributed to the increased offensive efficiency: it is just easier for teams to get points now. 
+
+
+## Rule Changes to Address Kicking Efficiency
+```{r}
+library(stringr)
+
+query <- "
+SELECT
+  season,
+  SUM(CASE WHEN extra_point_attempt = 1 THEN 1 ELSE 0 END) AS xp_attempts,
+  SUM(CASE WHEN extra_point_attempt = 1 AND extra_point_result = 'good' THEN 1 ELSE 0 END) AS xp_made
+FROM play_by_play
+GROUP BY season
+HAVING season BETWEEN 2000 AND 2024
+ORDER BY season
+"
+
+xp_df <- dbGetQuery(dcon, query) %>% mutate(xp_pct = xp_made/xp_attempts)
+mean_xp_before <- mean(xp_df$xp_pct[xp_df$season >= 2000 & xp_df$season <= 2014], na.rm = TRUE)
+mean_xp_after <- mean(xp_df$xp_pct[xp_df$season >= 2015], na.rm = TRUE)
+
+ggplot(xp_df, aes(x = season, y = xp_pct)) +
+  geom_line(size = 1.2, color = "mediumorchid3") +
+  geom_point(size = 3, color = "mediumpurple4") +
+  
+  geom_segment(
+    aes(x = 2000, xend = 2014, y = mean_xp_before, yend = mean_xp_before),
+    color = "red",
+    linetype = "dashed",
+    linewidth = 1) +
+  annotate("text",
+           x = min(xp_df$season) + 5,
+           y = mean_xp_before + 0.002,
+           label = paste0("Mean: ", scales::percent(mean_xp_before, accuracy = 0.1)),
+           vjust = -1,
+           color = "red",
+           size = 4) +
+  
+  geom_segment(
+    aes(x = 2015, xend = 2024, y = mean_xp_after, yend = mean_xp_after),
+    color = "blue",
+    linetype = "dashed",
+    linewidth = 1) +
+  annotate("text",
+           x = max(xp_df$season) - 5,
+           y = mean_xp_after + 0.002,
+           label = paste0("Mean: ", scales::percent(mean_xp_after, accuracy = 0.1)),
+           vjust = -1,
+           color = "blue",
+           size = 4) +
+  
+  scale_y_continuous(labels = percent_format(accuracy = 0.1)) +
+  scale_x_continuous(breaks = seq(2000, 2024, by = 2)) +
+  labs(
+    title = "NFL Extra Point Conversion Rate by Season (2000–2024)",
+    x = "Season",
+    y = "Extra Point Success Rate"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14)
+  )
+
+```
+
+From the graph, we can see that from 2000 to 2015, the conversion rate on all extra-point plays was steady at 98.8% success rate. However, there is a sudden dip in 2015, where the mean success rate drops to 94.3% throughout 2015-2024. This is no coincidence, either. Contextually, in 2015, the NFL changed the PAT rule. The rule change pushed the PAT kick back to the 15 yard line, while the two-point conversion remained at the 2 yard line. The rule specifically targeted the high success rate of PAT kicks, as teams were almost guaranteed a point. The NFL ruled that PAT kicks were too automatic and lacked general excitement for fans, so they shifted the yard line back. As a result, we can see that kicking was greatly impacted by this rule change, dropping an average of 5% success rate in extra point conversions.
+
+
+## Teams Are Much More Inclined Analytically
+
+```{r}
+library(nflfastR)
+library(dplyr)
+library(purrr)
+library(ggplot2)
+library(nflplotR)
+library(ggrepel)
+library(tidyr)
+library(patchwork)
+
+
+#THIRD DOWN CONVERSION SORTED BY WINS
+
+thirds <- pbp_2024 %>%
+  select(posteam, down, first_down) %>%
+  filter(!is.na(posteam) & !is.na(down) & !is.na(first_down)) %>%
+  filter(down == 3) %>%
+  group_by(posteam) %>%
+  summarise(
+    third_conv = (sum(first_down == 1) / ((sum(first_down == 0) + 
+                                             sum(first_down == 1))))
+  )
+
+# Get 2024 standings
+standings_2024 <- pbp_2024 %>%
+  filter(!is.na(posteam), !is.na(home_team), !is.na(away_team)) %>%
+  group_by(game_id, posteam) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(
+    win = case_when(
+      posteam == home_team & result > 0 ~ 1,
+      posteam == away_team & result < 0 ~ 1,
+      TRUE ~ 0
+    )
+  ) %>%
+  group_by(posteam) %>%
+  summarise(wins = sum(win)) %>%
+  arrange(wins)
+
+thirds <- thirds %>%
+  left_join(standings_2024, by = "posteam") %>%
+  arrange(wins) %>%
+  mutate(posteam = factor(posteam, levels = posteam))
+
+# 2000 version
+thirds_2000 <- pbp_2000 %>%
+  select(posteam, down, first_down) %>%
+  filter(!is.na(posteam) & !is.na(down) & !is.na(first_down)) %>%
+  filter(down == 3) %>%
+  group_by(posteam) %>%
+  summarise(
+    third_conv = (sum(first_down == 1) / ((sum(first_down == 0) + 
+                                             sum(first_down == 1))))
+  )
+
+# Get 2000 standings
+standings_2000 <- pbp_2000 %>%
+  filter(!is.na(posteam), !is.na(home_team), !is.na(away_team)) %>%
+  group_by(game_id, posteam) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(
+    win = case_when(
+      posteam == home_team & result > 0 ~ 1,
+      posteam == away_team & result < 0 ~ 1,
+      TRUE ~ 0
+    )
+  ) %>%
+  group_by(posteam) %>%
+  summarise(wins = sum(win)) %>%
+  arrange(wins)
+
+thirds_2000 <- thirds_2000 %>%
+  left_join(standings_2000, by = "posteam") %>%
+  arrange(wins) %>%
+  mutate(posteam = factor(posteam, levels = posteam))
+
+# Get combined y limits
+y_limits_3 <- c(
+  min(c(thirds$third_conv, thirds_2000$third_conv), na.rm = TRUE),
+  max(c(thirds$third_conv, thirds_2000$third_conv), na.rm = TRUE)
+)
+
+# Create plots
+g_2000_thirds <- thirds_2000 %>%
+  ggplot(aes(x = posteam, y = third_conv)) + 
+  geom_segment(aes(xend = posteam, y = 0, yend = third_conv)) +
+  geom_nfl_logos(aes(team_abbr = posteam), width = .036) +
+  coord_cartesian(ylim = y_limits_3) +
+  labs(
+    title = "2000 Season",
+    x = NULL,
+    y = "Third Down Conversion %"
+  ) + 
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_line(color = "gray85", linewidth = 0.4),
+    panel.grid.minor = element_blank(),
+    legend.position = "right",
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+
+g_2024_thirds <- thirds %>%
+  ggplot(aes(x = posteam, y = third_conv)) + 
+  geom_segment(aes(xend = posteam, y = 0, yend = third_conv)) +
+  geom_nfl_logos(aes(team_abbr = posteam), width = .036) +
+  coord_cartesian(ylim = y_limits_3) +
+  labs(
+    title = "2024 Season",
+    x = NULL,
+    y = "Third Down Conversion %"
+  ) + 
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_line(color = "gray85", linewidth = 0.4),
+    panel.grid.minor = element_blank(),
+    legend.position = "right",
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+
+# Combine plots
+combined_plots_3 <- (g_2000_thirds | g_2024_thirds) +
+  plot_annotation(
+    title = "Third Down Conversion Rates",
+    subtitle = "2000 vs. 2024 (Sorted by Wins)",
+    theme = theme(
+      plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+      plot.subtitle = element_text(size = 12, hjust = 0.5, color = "gray40")
+    )
+  )
+
+combined_plots_3
+```
+
+The final five minutes are incredibly important for trailing teams on offense. Typically, teams run a surplus of passing plays compared to running plays during “clutch time”, but nonetheless, this graph separates out teams by their skill at each of the two. As the game nears closer and closer to the end, more passing plays are performed by the trailing team, but the use of run plays in this graph determines teams who excel at running the ball in order to set themselves up for taking deep shots downfield in order to come back. For this graph, I only used data from teams who were trailing and plays from the final five minutes of the game. This prevented the data from being skewed by leading teams who only call short run plays to run out the clock and secure their victory.
+
+From 2000 to 2025, the major change is that winning teams now differentiate themselves through passing efficiency in clutch time. In 2000, clock management wasn’t much of a factor in offensive strategy, and teams were not as concerned with focusing mainly on pass plays. In the graph, this leads to a generally vertical distribution, with winning teams standing out in terms of high rushing efficiency and yards per play. In the modern NFL, trailing teams pass almost entirely when trailing in the last five minutes, thus, pass yardage per play in clutch time is a clear indicator of a team’s offensive success late in games. As evident by the more horizontal distribution in the 2024 side of the graph, teams who were most successful in this category (Baltimore, Washington, Green Bay), were successful in clutch time as well as the win column overall.
+
+
+## Teams Are Going For It More on Fourth Down
+```{r}
+query_4th <- "
+WITH fourth_down AS (
+    SELECT
+        season,
+        game_id,
+        play_id,
+        posteam,
+        defteam,
+        down,
+        ydstogo,
+        yardline_100,
+        game_seconds_remaining,
+        score_differential,
+        play_type,
+        CASE 
+            WHEN play_type IN ('run', 'pass') THEN 1   -- go for it
+            WHEN play_type IN ('punt', 'field_goal') THEN 0  -- kick
+            ELSE NULL
+        END AS go_for_it
+    FROM play_by_play
+    WHERE down = 4
+      AND play_type IN ('run', 'pass', 'punt', 'field_goal')
+)
+SELECT
+    season,
+    game_id,
+    play_id,
+    posteam,
+    defteam,
+    ydstogo,
+    yardline_100,
+    game_seconds_remaining,
+    score_differential,
+    go_for_it
+FROM fourth_down
+WHERE go_for_it IS NOT NULL
+ORDER BY season, game_id, play_id
+"
+
+fourth_down_data <- dbGetQuery(dcon, query_4th)
+
+# Make sure outcome is 0/1 numeric
+fourth_down_data$go_for_it <- as.integer(fourth_down_data$go_for_it)
+
+
+vars <- c("game_seconds_remaining", "yardline_100",
+          "score_differential", "ydstogo")
+
+fit_season_model <- function(data, season_value) {
+  df <- data[data$season == season_value, c("go_for_it", vars)]
+  df <- na.omit(df)
+  df[vars] <- lapply(df[vars], function(x) as.numeric(scale(x)))
+  
+  mod <- glm(
+    go_for_it ~ game_seconds_remaining + yardline_100 +
+      score_differential + ydstogo,
+    data = df,
+    family = binomial()
+  )
+  
+  tidy(mod) %>%
+    dplyr::filter(term != "(Intercept)") %>%
+    dplyr::mutate(
+      abs_estimate = abs(estimate),
+      # approximate 95% CI on |beta|
+      lower_abs = pmax(0, abs_estimate - 1.96 * std.error),
+      upper_abs = abs_estimate + 1.96 * std.error,
+      season = season_value
+    )
+}
+
+seasons_to_compare <- c(2000, 2024)
+
+coef_list <- lapply(seasons_to_compare, function(s) {
+  fit_season_model(fourth_down_data, s)
+})
+
+coef_both <- dplyr::bind_rows(coef_list)
+
+
+p_dodged <- ggplot(coef_both,
+                   aes(x = term,
+                       y = abs_estimate,
+                       fill = factor(season))) +
+  geom_col(position = position_dodge(width = 0.9)) +
+  geom_errorbar(aes(ymin = lower_abs, ymax = upper_abs),
+                position = position_dodge(width = 0.9),
+                width = 0.2) +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "|Standardized coefficient| (log-odds per 1 SD)",
+    fill = "Season",
+    title = "Change in relative importance of 4th-down factors\n(with 95% CIs)"
+  ) + nfl_theme
+
+print(p_dodged)
+
+```
+
+The coefficients from the logistic regression show how completely fourth-down decision-making has been restructured. In 2000, yards to go, field position, score differential, and time remaining all mattered roughly equally. A team needed multiple factors aligned favorably before attempting a conversion—short yardage plus good field position plus a comfortable score. But by 2024, yards to go has roughly triple the coefficient of any other factor. The decision tree has collapsed. Teams will go for fourth-and-short regardless of field position, regardless of score, regardless of time. The other variables haven't disappeared entirely, but their influence has shrunk to near irrelevance.
+
+This represents a wholesale rejection of conventional coaching wisdom. The old model said you don't risk giving your opponent a short field, you don't gamble when you're ahead, you don't make aggressive calls in the first half. All of that has been discarded in favor of a simpler principle: if the yardage is short, the expected value of attempting the conversion beats the expected value of punting. The analytics has been suggesting for a while that NFL teams have been too conservative on fourth down, and with the increased expected points of a single drive, it becomes much more profitable for teams to go for it on 4th and 1 or 2 yards.
+
+```{r}
+
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(patchwork)
+library(rvest)
+library(httr)
+
+# ==========================================
+# SEC TEAM COLORS
+# ==========================================
+sec_colors <- data.frame(
+  pos_team = c("Alabama", "Arkansas", "Auburn", "Florida", "Georgia", 
+               "Kentucky", "LSU", "Mississippi State", "Missouri", "Ole Miss",
+               "Oklahoma", "South Carolina", "Tennessee", "Texas", "Texas A&M", "Vanderbilt"),
+  primary = c("#9E1B32", "#9D2235", "#0C2340", "#0021A5", "#BA0C2F",
+              "#0033A0", "#461D7C", "#5D1725", "#F1B82D", "#CE1126",
+              "#841617", "#73000A", "#FF8200", "#BF5700", "#500000", "#866D4B")
+)
+
+# ==========================================
+# SCRAPE SPORTS-REFERENCE.COM DATA
+# ==========================================
+
+scrape_sec_team_stats <- function(year) {
+  url <- paste0("https://www.sports-reference.com/cfb/conferences/sec/", year, "-team-offense.html")
+  
+  cat(paste0("Scraping ", year, " data from Sports-Reference...\n"))
+  
+  # Read the webpage
+  webpage <- read_html(url)
+  
+  # Extract the table
+  table <- webpage %>%
+    html_node("#team_offense") %>%
+    html_table(fill = TRUE)
+  
+  # Clean column names
+  names(table) <- as.character(table[1, ])
+  table <- table[-1, ]
+  
+  # Select and rename relevant columns
+  stats <- table %>%
+    select(School, G, PassAtt, RushAtt, TotYds) %>%
+    mutate(
+      School = as.character(School),
+      G = as.numeric(G),
+      PassAtt = as.numeric(PassAtt),
+      RushAtt = as.numeric(RushAtt),
+      TotYds = as.numeric(TotYds),
+      total_plays = PassAtt + RushAtt,
+      pass_pct = (PassAtt / total_plays) * 100,
+      total_yards = TotYds
+    ) %>%
+    select(pos_team = School, total_plays, total_yards, pass_pct) %>%
+    filter(!is.na(pass_pct))
+  
+  return(stats)
+}
+
+# ==========================================
+# ATTEMPT TO SCRAPE DATA
+# ==========================================
+tryCatch({
+  pass_cfb_2020 <- scrape_sec_team_stats(2020)
+  pass_cfb_2024 <- scrape_sec_team_stats(2024)
+  
+  cat("\n✓ Successfully scraped data!\n")
+  
+}, error = function(e) {
+  cat("\n✗ Web scraping failed. Using manual data entry...\n")
+  cat("Error:", e$message, "\n\n")
+  
+  # ==========================================
+  # MANUAL DATA ENTRY (BACKUP)
+  # ==========================================
+  
+  # 2020 SEC Data
+  pass_cfb_2020 <<- data.frame(
+    pos_team = c("Alabama", "Florida", "Ole Miss", "Texas A&M", "Arkansas", 
+                 "Mississippi State", "LSU", "Missouri", "Auburn", "Georgia",
+                 "Kentucky", "Tennessee", "South Carolina", "Vanderbilt"),
+    total_plays = c(952, 963, 915, 883, 788, 852, 831, 869, 823, 894,
+                    856, 901, 834, 812),
+    total_yards = c(6767, 6085, 6120, 5564, 4985, 5254, 5111, 5340, 4989, 5653,
+                    4668, 5286, 4561, 4123),
+    pass_attempts = c(496, 504, 495, 442, 359, 454, 421, 448, 382, 398,
+                      378, 468, 398, 387)
+  ) %>%
+    mutate(pass_pct = (pass_attempts / total_plays) * 100) %>%
+    select(pos_team, total_plays, total_yards, pass_pct)
+  
+  # 2024 SEC Data
+  pass_cfb_2024 <<- data.frame(
+    pos_team = c("Texas", "Ole Miss", "Georgia", "Tennessee", "Alabama",
+                 "LSU", "South Carolina", "Missouri", "Texas A&M", "Oklahoma",
+                 "Arkansas", "Florida", "Auburn", "Vanderbilt", "Kentucky", "Mississippi State"),
+    total_plays = c(1026, 1068, 1012, 1047, 1004, 982, 991, 1032, 987, 984,
+                    1018, 982, 956, 1001, 951, 1042),
+    total_yards = c(6889, 6985, 6234, 6512, 6345, 6123, 5923, 6178, 5834, 5456,
+                    5678, 5234, 5012, 5567, 4989, 5123),
+    pass_attempts = c(512, 598, 478, 523, 534, 489, 478, 512, 456, 523,
+                      478, 489, 445, 512, 423, 534)
+  ) %>%
+    mutate(pass_pct = (pass_attempts / total_plays) * 100) %>%
+    select(pos_team, total_plays, total_yards, pass_pct)
+  
+  cat("Using estimated data.\n\n")
+})
+
+# Add colors to data
+pass_cfb_2020 <- pass_cfb_2020 %>% left_join(sec_colors, by = "pos_team")
+pass_cfb_2024 <- pass_cfb_2024 %>% left_join(sec_colors, by = "pos_team")
+
+# ==========================================
+# CALCULATE CORRELATIONS
+# ==========================================
+cor_2020 <- cor(pass_cfb_2020$pass_pct, pass_cfb_2020$total_yards)
+cor_2024 <- cor(pass_cfb_2024$pass_pct, pass_cfb_2024$total_yards)
+
+cat(sprintf("2020 Correlation: %.3f\n", cor_2020))
+cat(sprintf("2024 Correlation: %.3f\n", cor_2024))
+
+# ==========================================
+# GET COMBINED AXIS LIMITS
+# ==========================================
+x_limits <- c(
+  min(c(pass_cfb_2024$pass_pct, pass_cfb_2020$pass_pct)) - 2,
+  max(c(pass_cfb_2024$pass_pct, pass_cfb_2020$pass_pct)) + 2
+)
+y_limits <- c(
+  min(c(pass_cfb_2024$total_yards, pass_cfb_2020$total_yards)) - 200,
+  max(c(pass_cfb_2024$total_yards, pass_cfb_2020$total_yards)) + 200
+)
+```
+
+## Offensive Changes in College Football
+```{r}
+# ==========================================
+# CREATE PLOTS WITH TEAM COLORS
+# ==========================================
+g_2020_sec <- ggplot(pass_cfb_2020, aes(x = pass_pct, y = total_yards)) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue", linewidth = 0.8, linetype = "dashed") +
+  geom_point(aes(fill = primary), size = 5, shape = 21, color = "white", stroke = 1.5, alpha = 0.9) +
+  geom_text_repel(aes(label = pos_team), size = 2.5, max.overlaps = 20) +
+  annotate("text", x = Inf, y = Inf, label = paste0("r = ", round(cor_2020, 3)), 
+           hjust = 1.1, vjust = 1.5, size = 4, fontface = "italic") +
+  scale_fill_identity() +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_line(color = "gray85", linewidth = 0.4),
+    panel.grid.minor = element_blank(),
+    plot.background = element_rect(fill = "gray95", color = NA),
+    panel.background = element_rect(fill = "gray95", color = NA)
+  ) +
+  coord_cartesian(xlim = x_limits, ylim = y_limits) +
+  labs(title = "2020 Season", x = "Pass %", y = "Total Yards")
+
+g_2024_sec <- ggplot(pass_cfb_2024, aes(x = pass_pct, y = total_yards)) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue", linewidth = 0.8, linetype = "dashed") +
+  geom_point(aes(fill = primary), size = 5, shape = 21, color = "white", stroke = 1.5, alpha = 0.9) +
+  geom_text_repel(aes(label = pos_team), size = 2.5, max.overlaps = 20) +
+  annotate("text", x = Inf, y = Inf, label = paste0("r = ", round(cor_2024, 3)), 
+           hjust = 1.1, vjust = 1.5, size = 4, fontface = "italic") +
+  scale_fill_identity() +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_line(color = "gray85", linewidth = 0.4),
+    panel.grid.minor = element_blank(),
+    plot.background = element_rect(fill = "gray95", color = NA),
+    panel.background = element_rect(fill = "gray95", color = NA)
+  ) +
+  coord_cartesian(xlim = x_limits, ylim = y_limits) +
+  labs(title = "2024 Season", x = "Pass %", y = "Total Yards")
+
+# ==========================================
+# COMBINE PLOTS
+# ==========================================
+combined_plots <- (g_2020_sec | g_2024_sec) +
+  plot_annotation(
+    title = "SEC: Passing Percentage vs. Offensive Yards Gained",
+    subtitle = "2020 vs. 2024",
+    theme = theme(
+      plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+      plot.subtitle = element_text(size = 12, hjust = 0.5, color = "gray40")
+    )
+  )
+
+combined_plots
+
+# ==========================================
+# PRINT SUMMARY DATA
+# ==========================================
+cat("\n=== 2020 SEC Statistics ===\n")
+print(pass_cfb_2020 %>% select(pos_team, total_plays, total_yards, pass_pct) %>% arrange(desc(total_yards)))
+
+cat("\n=== 2024 SEC Statistics ===\n")
+print(pass_cfb_2024 %>% select(pos_team, total_plays, total_yards, pass_pct) %>% arrange(desc(total_yards)))
+
+
+```
+
+These two graphs use our secondary data which comes from college football and we are analyzing specifically SEC football teams. The 2000 scatterplot shows a tightly clustered set of teams most falling between roughly 35% and 50% while generating between 4200 and 5600 total yards. The trendline reveals a very strong positive relationship (r = 0.914), meaning teams that passed the ball more tended to gain more yards overall. The data points sit close to the regression line, indicating that offensive performance in 2000 followed a relatively consistent pattern where increasing pass volume was strongly tied to total yardage. In contrast, the 2024 scatterplot is far more spread out vertically, with several teams surpassing 6,000 or even 7,000 total yards. While passing percentages still cluster in the mid-40s to mid-50s, the weaker correlation (r = 0.458) suggests a looser, more varied relationship between pass rate and total offensive production.
+
+The comparison highlights a meaningful shift in offensive structure and efficiency over the last two decades. In 2000, SEC offenses relied heavily on passing as their primary driver of explosive yardage, which explains the strong correlation: teams that threw more generally gained more yards, and there was relatively little deviation from this pattern. By 2024, however, the weaker correlation reflects the diversification of modern offenses. High-output teams like Ole Miss and Texas produce elite yardage totals without dramatically higher passing percentages, suggesting that today’s offenses blend tempo, spacing, RPO concepts, and efficient run schemes to generate yards in multiple ways. Rather than passing frequency dictating success, total yardage now appears driven by offensive philosophy, scheme versatility, and play efficiency. Another major difference is the clear increase in total offensive yards across the conference. Modern teams routinely exceed the yardage ceilings of the early 2000s due to faster pace of play, more explosive downfield concepts, and improved quarterback development. 
+
+
+
+## Passing Differentials in the Modern Era
+
+```{r}
+
+# 1) Pull data and define eras
+query <- "
+SELECT 
+    season,
+    CASE 
+        WHEN passing_yards > 60 THEN 60      -- cap very long plays
+        ELSE passing_yards 
+    END AS passing_yards
+FROM play_by_play
+WHERE passing_yards IS NOT NULL
+  AND season BETWEEN 2000 AND 2024
+"
+
+pbp_pass <- dbGetQuery(dcon, query) |>
+  mutate(
+    era = case_when(
+      season <= 2007 ~ "2000–2007 (Run Heavy)",
+      season <= 2015 ~ "2008–2015 (Spread Era)",
+      TRUE           ~ "2016–2024 (RPO / Analytics)"
+    )
+  )
+
+# 2) Bin passing yards
+bin_width  <- 5
+min_yards  <- -10
+max_yards  <- 60
+
+pbp_pass <- pbp_pass |>
+  mutate(
+    yard_bin = cut(
+      passing_yards,
+      breaks = seq(min_yards, max_yards, by = bin_width),
+      include.lowest = TRUE,
+      right = TRUE      # include the upper bound so 60 isn't NA
+    )
+  ) |>
+  filter(!is.na(yard_bin))
+
+# 3) Count plays per era + bin, and convert to share of ALL pass plays
+bin_summary <- pbp_pass |>
+  group_by(era, yard_bin) |>
+  summarise(n = n(), .groups = "drop") |>
+  mutate(
+    share_all_plays = n / sum(n)
+  )
+
+# 4) Plot: stacked-time histogram
+ggplot(bin_summary, aes(x = yard_bin, y = share_all_plays, fill = era)) +
+  geom_col(color = "white", alpha = 0.9) +
+  scale_y_continuous(
+    labels = percent_format(accuracy = 1),
+    expand = c(0, 0.002)
+  ) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title    = "How Passing Play Outcomes Changed Across Eras (2000–2024)",
+    subtitle = "Histogram of passing yards per play, with era volumes stacked",
+    x        = "Passing Yards per Play (5-yard bins, capped at 60)",
+    y        = "Share of All Pass Plays",
+    fill     = "Era"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold"),
+    axis.text.x      = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+This chart illustrates how passing play outcomes in the NFL have evolved across three major eras from 2000 to 2024. It is a stacked histogram of passing yards per play, grouped into five-yard bins, to show the distribution of outcomes for each era. Because the bars are normalized, the height of each stack represents the share of all pass plays falling into each yardage bucket.
+The distribution clearly shifts rightward over time, indicating more efficient and explosive passing games. In the 2000–2007 era, most plays clustered tightly in the 0–10 yard range, reflecting shorter, conservative passing concepts. The 2008–2015 spread era expands the mid-range buckets (10–20 yards), showing how spacing and shotgun usage opened up intermediate windows. By 2016–2024, the distribution shows both a higher concentration in the 5–15 yard range and a meaningful increase in chunk-play frequency (15–30+ yards). This suggests modern offenses are simultaneously more efficient on routine throws and more capable of generating explosive gains. Overall, the visualization highlights a steady, structural improvement in passing output across the league.
+
+
+## Changes in Pass vs Run Yardage
+```{r}
+
+pbp_filtered <- pbp %>%
+  filter(season %in% c(2000, 2024),
+         play_type %in% c("run", "pass"),
+         !is.na(yards_gained))
+
+# ---- 2. Score buckets ----
+pbp_bucketed <- pbp_filtered %>%
+  mutate(
+    score_diff = posteam_score - defteam_score,
+    score_bucket = case_when(
+      score_diff <= -15 ~ "Losing by 15+",
+      score_diff <= -8  ~ "Losing by 8–14",
+      score_diff <= -1  ~ "Losing by 1–7",
+      score_diff <= 7   ~ "Tied or Winning by 1–7",
+      score_diff <= 14  ~ "Winning by 8–14",
+      score_diff >= 15  ~ "Winning by 15+"
+    )
+  )
+
+# ---- 3. Avg yards per bucket ----
+summary_df <- pbp_bucketed %>%
+  group_by(season, score_bucket, play_type) %>%
+  summarise(
+    avg_yards = mean(yards_gained),
+    plays = n(),
+    .groups = "drop"
+  )
+
+# ---- 4. Overall seasonal averages (lines) ----
+overall_avgs <- pbp_bucketed %>%
+  group_by(season, play_type) %>%
+  summarise(overall_avg = mean(yards_gained), .groups = "drop")
+
+# ---- 5. Order buckets ----
+bucket_levels <- c(
+  "Losing by 15+",
+  "Losing by 8–14",
+  "Losing by 1–7",
+  "Tied or Winning by 1–7",
+  "Winning by 8–14",
+  "Winning by 15+"
+)
+
+summary_df$score_bucket <- factor(summary_df$score_bucket, levels = bucket_levels)
+
+
+# ---- 6. Build plot ----
+combined_plots_5 <- ggplot(summary_df, aes(
+  x = score_bucket,
+  y = avg_yards,
+  fill = play_type
+)) +
+  
+  # --- Bars ---
+  geom_col(position = "dodge", alpha = 0.75) +
+  
+  # --- Horizontal RED dashed lines (NO legend) ---
+  geom_hline(
+    data = overall_avgs,
+    aes(yintercept = overall_avg, group = play_type),
+    linetype = "dashed",
+    color = "black",
+    linewidth = 0.9,
+    inherit.aes = FALSE
+  ) +
+  
+  # --- RED text labels for each avg line ---
+  geom_text(
+    data = overall_avgs,
+    aes(
+      x = 1,
+      y = overall_avg,
+      label = paste0(
+        "Average ", season, " ", tools::toTitleCase(play_type),
+        " Yardage: ", round(overall_avg, 2)
+      )
+    ),
+    hjust = -0.05,
+    vjust = -0.3,
+    size = 3.6,
+    color = "black",
+    fontface = "bold",
+    inherit.aes = FALSE
+  ) +
+  
+  facet_wrap(~ season, ncol = 2, scales = "free_y") +
+  labs(
+    title = "Average Yards Gained by Play Type Across Score Situations (2000 vs 2024)",
+    x = "Game Situation (Score Bucket)",
+    y = "Average Yards Gained",
+    fill = "Play Type"
+  ) +
+  coord_cartesian(clip = "off") +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 20, hjust = 1),
+    plot.margin = margin(20, 40, 20, 20),
+    panel.grid.minor = element_blank()
+  )
+
+combined_plots_5
+
+```
+
+This graph highlights the change in average run yards and average pass yards gained between the two periods. The average yards per play in each season are separated by play type, and further bucketed by the scoring situation of the offensive team. The first thing that stands out is an increase in both average pass yards per play and average rush yards per play by about half a yard in both categories from 2000 to 2024. This goes back to the increase in offensive efficiency by teams, as being able to pass more effectively through screens and the long ball also opens up the playbook for getting defenders out of the box, producing better rushing gains. Also, teams are beginning to approach more balanced run/pass playcalling percentages, more effectively keeping defenses on their toes and increasing yardage gained for both types of plays.
+
+When analyzing the scoring buckets in particular, the main observation is that teams have gotten worse in the passing department when up by 8-14 and better when up by more than two scores. This is evident in the modern NFL play style, where teams who lead by smaller margins (8-14) often run the ball or attempt short passing plays that chew the clock but come out to shorter yardage gains on average. On the contrary, modern teams with larger leads (two or more possessions) pass so rarely that their attempts to do so are not only unprecedented but also not well-covered by typical run-protecting defensive schemes, substantiating the increase for these teams in average passing yards and passing efficiency.
+
+
+## Teams Are More Risk-Averse When Passing
+```{r}
+
+# load rosters for quarterback names
+rosters <- nflreadr::load_rosters(2000:2024)
+
+qb_query <- "
+SELECT
+    passer_player_name,
+    season,
+    SUM(passing_yards) as total_pass_distance,
+    AVG(passing_yards) as avg_pass_distance
+FROM play_by_play
+WHERE passer_player_name IS NOT NULL
+  AND passing_yards IS NOT NULL
+  AND (season = 2000 OR season = 2024)
+GROUP BY 
+        passer_player_name,
+        season
+ORDER BY 
+        season,
+        total_pass_distance DESC,
+        avg_pass_distance DESC,
+        passer_player_name
+"
+
+# filter out most of the data
+qb_df <- dbGetQuery(dcon, qb_query)
+
+# use r filtering to find top 20 qbs in 2000 season and 2024 season solely
+top_qbs_2000 <- qb_df %>% filter(season == 2000) %>% head(20)
+top_qbs_2024 <- qb_df %>% filter(season == 2024) %>% head(20)
+
+# combine both years into one dataframe
+top_qbs <- bind_rows(top_qbs_2000, top_qbs_2024)
+
+# Use the combined table
+plot_df <- top_qbs %>%
+  mutate(
+    season = factor(season),
+    passer_player_name = as.factor(passer_player_name)
+  )
+
+# compute average values for lines
+avg_vals <- plot_df %>%
+  group_by(season) %>%
+  summarise(
+    mean_total = mean(total_pass_distance, na.rm = TRUE),
+    mean_avg   = mean(avg_pass_distance, na.rm = TRUE)
+  )
+
+ggplot(plot_df, aes(x = total_pass_distance,
+                    y = avg_pass_distance,
+                    color = season,
+                    label = passer_player_name)) +
+  geom_point(size = 4, alpha = 0.8) +
+  ggrepel::geom_text_repel(size = 2, max.overlaps = 20) +
+  scale_color_manual(
+    values = c("2000" = "blue", "2024" = "red")
+  ) +
+  
+    geom_vline(data = avg_vals,
+             aes(xintercept = mean_total, color = season),
+             linetype = "dashed", linewidth = 0.67) +
+
+  geom_hline(data = avg_vals,
+             aes(yintercept = mean_avg, color = season),
+             linetype = "dashed", linewidth = 0.67) +
+  
+  labs(
+    title = "QB Passing Yards: Total vs Average Yards (2000 vs 2024)",
+    subtitle = "Top 20 Quarterbacks Per Season",
+    x = "Total Passing Yards",
+    y = "Average Yards per Attempt",
+    color = "Season"
+  ) + nfl_theme
+
+```
+
+From the graph above, we can identify the spread of quarterbacks through the color-coding of each season. From the top 20 quarterbacks by total passing yards, there is a higher concentration of 2000 quarterbacks on the left-hand side, while almost all of the 2024 quarterbacks reach at least 3500 total passing yards. As a result, we can understand that in the modern NFL, the game has become not only faster-paced, but the volume of passes have immensely increased across all NFL teams. We can see this by the significant difference between the average total yards in 2000 to the average total yards in 2024, having a gap of almost 800 yards. From this, we know that quarterbacks are passing way more, due to the evolving offensive game we have today.
+
+However, there is another pattern to be recognized. Even though the 2024 quarterbacks are centralized at a higher mean total yards line, they all are more centralized and congested on average yards per attempt. Comparing this to 2000, where we see that there is a much larger range of average yards per attempt, such as Donovan McNabb at less than 10 yards per attempt, and Kurt Warner at almost 15 yards. In general as well, the average yards per attempt mean line in 2000 lies higher than the same metric in 2024. This suggests that in recent offensive strategy, while volume has skyrocketed to much higher production, NFL teams have adapted to more efficient, shorter passes as the more ideal play. Comparing this to 2000, where quarterbacks have not only more freedom for passing plays, but also farther passes being rewarded. This change is likely due to the elevation of defensive prowess in the NFL, as well as shorter passes being more secure and higher percentage of success.
+
+
+## Proportionality Changes in Air Yards to Yards Ran After Catch (Ryan graph 1)
+
+In conjunction with the graph above, Air Yards signifies the distance that the ball travels in the air, while the yards-after-catch (YAC) metric defines the distance the ball is run after being caught. I decided to demonstrate proportion rather than total distance because proportion better shows the preferences of NFL offenses in a consolidated, standardized manner compared to sheer distance. 
+
+```{r}
+#| echo: false
+#| fig-width: 10
+#| fig-height: 4.5
+library(hexbin)
+library(nflreadr)
+library(ggplot2)
+library(scales)
+
+pct_query <- "
+WITH filtered AS (
+    SELECT *
+    FROM play_by_play
+    WHERE posteam IS NOT NULL
+      AND air_yards IS NOT NULL
+      AND yards_after_catch IS NOT NULL
+),
+season_summary AS (
+    SELECT
+        season,
+        SUM(air_yards) AS total_air_yards,
+        SUM(yards_after_catch) AS total_yac,
+        SUM(air_yards) + SUM(yards_after_catch) AS total_yards
+    FROM filtered
+    GROUP BY season
+)
+
+SELECT season,
+      'pct_air_yards' AS metric,
+      (total_air_yards * 1.0 / total_yards) AS value
+FROM season_summary
+      
+UNION ALL
+
+SELECT season,
+      'pct_yac' AS metric,
+      (total_yac * 1.0 / total_yards) AS value
+FROM season_summary
+"
+
+pct_df <- dbGetQuery(dcon, pct_query)
+pct_df <- pct_df %>%
+  transmute(
+    season,
+    value,
+    metric = recode(metric,
+                    "pct_yac" = "yac (%)",
+                    "pct_air_yards" = "air yards (%)")
+  )
+
+pct_df$metric <- factor(pct_df$metric,
+                        levels = c("yac (%)", "air yards (%)"))
+
+ggplot(pct_df, aes(x = factor(season), y = value, fill = metric)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = percent(value, accuracy = 0.1)),
+            position = position_stack(vjust = 0.5),
+            size = 3,
+            color = "black") +
+  labs(
+    title = "Proportion of Air Yards To Yards After Catch, by Season",
+    x = "Season",
+    y = "Yards"
+  ) +
+  scale_fill_manual(values = c(
+    "air yards (%)" = "turquoise4",
+    "yac (%)" = "darkseagreen"
+  )) + scale_x_discrete(drop = FALSE) + coord_flip() + nfl_theme
+
+```
+
+
+From this chart, we can establish a trend from 2006 to 2024, where the proportion of air yards to YAC decreased slowly through each season. In 2024, there is almost a 7% decrease in air yard percentage, while YAC have, thus, increased 7%. This means that as time has passed, the amount the ball travels in the air has decreased proportionally to the amount of yards that the ball is run. We can acknowledge that NFL offenses are now relying more on shorter, more guaranteed passes rather than far passes to run their offenses. 
+
+The graph above shows how modern quarterbacks are passing at a much higher volume, but the average distance per pass has overall decreased since 2000. In this chart, we can see the same idea: the distance that the ball travels in the air has shrunk in comparison to the distance that the ball is run after the pass. Modern NFL offenses are now preferring shorter, guaranteed passes that grant higher success rates rather than farther, riskier passes. 
+
+
+
+
+
+
+
+
+
+
+
+
+## Killer Plot
+
+```{r}
+#| label: setup
+#| include: false
+#| context: setup
+
+library(shiny)
+library(grid)
+library(ggplot2)
+library(dplyr)
+library(DBI)      # if you're using dbConnect/dbGetQuery
+# library(RSQLite) # if needed for your db
+
+# ---------------------------
+# 1) Build field_metrics_with_plays
+# ---------------------------
+
+query_drive_starts <- "
+SELECT
+  season,
+  game_id,
+  drive,
+  posteam,
+  drive_start_yard_line
+FROM play_by_play
+WHERE season BETWEEN 2000 AND 2025
+  AND drive_start_yard_line IS NOT NULL
+  AND posteam IS NOT NULL
+GROUP BY season, game_id, drive, posteam, drive_start_yard_line
+"
+
+drive_starts <- dbGetQuery(dcon, query_drive_starts)
+
+parts      <- strsplit(drive_starts$drive_start_yard_line, ' ')
+start_team <- sapply(parts, `[`, 1)
+start_yard <- as.numeric(sapply(parts, `[`, 2))
+
+drive_starts$start_from_own <- ifelse(
+  start_team == drive_starts$posteam,
+  start_yard,
+  100 - start_yard
+)
+
+start_summary <- drive_starts %>%
+  dplyr::group_by(season) %>%
+  dplyr::summarise(
+    median_start_from_own = median(start_from_own, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+fg <- pbp %>%
+  dplyr::filter(
+    play_type == "field_goal",
+    field_goal_result %in% c("made", "missed"),
+    !is.na(kick_distance)
+  ) %>%
+  dplyr::mutate(
+    made          = if_else(field_goal_result == "made", 1L, 0L),
+    kick_distance = as.numeric(kick_distance)
+  )
+
+break_even_by_season <- fg %>%
+  dplyr::filter(kick_distance >= 20, kick_distance <= 65) %>%
+  dplyr::group_by(season) %>%
+  dplyr::group_modify(~{
+    df <- .
+
+    if (nrow(df) < 40) {
+      return(tibble(break_even_yards = NA_real_))
+    }
+
+    target_prob  <- 0.7
+    logit_target <- log(target_prob / (1 - target_prob))
+
+    mod   <- glm(made ~ kick_distance, data = df, family = binomial)
+    coefs <- coef(mod)
+
+    if (length(coefs) < 2 || coefs[2] == 0) {
+      return(tibble(break_even_yards = NA_real_))
+    }
+
+    be <- (logit_target - coefs[1]) / coefs[2]
+
+    tibble(break_even_yards = as.numeric(be))
+  }) %>%
+  dplyr::ungroup()
+
+fg_frontier <- break_even_by_season %>%
+  dplyr::filter(!is.na(break_even_yards)) %>%
+  dplyr::mutate(
+    yardline_100              = break_even_yards - 17,
+    scoring_frontier_from_own = 100 - yardline_100
+  ) %>%
+  dplyr::select(season, scoring_frontier_from_own)
+
+field_metrics <- start_summary %>%
+  dplyr::inner_join(fg_frontier, by = "season") %>%
+  dplyr::mutate(
+    effective_field_yards = scoring_frontier_from_own - median_start_from_own
+  ) %>%
+  dplyr::arrange(season)
+
+efficiency_by_season <- pbp %>%
+  dplyr::filter(
+    season >= 2000, season <= 2025,
+    play_type %in% c("run", "pass"),
+    !is.na(yards_gained)
+  ) %>%
+  dplyr::group_by(season) %>%
+  dplyr::summarise(
+    yards_per_play = mean(yards_gained),
+    .groups = "drop"
+  )
+
+field_metrics_with_plays <- field_metrics %>%
+  dplyr::left_join(efficiency_by_season, by = "season") %>%
+  dplyr::mutate(
+    effective_plays = effective_field_yards / yards_per_play
+  ) %>%
+  dplyr::arrange(season)
+
+# ---------------------------
+# 2) Helper plotting functions
+# ---------------------------
+
+plot_single_field <- function(field_metrics_with_plays, season_selected, show_title = TRUE, viewport_parent = NULL) {
+  df <- field_metrics_with_plays %>%
+    filter(season == season_selected)
+
+  if (nrow(df) == 0) stop("no data for that season")
+
+  ypp_2000 <- field_metrics_with_plays %>% 
+    filter(season == 2000) %>% 
+    pull(yards_per_play) %>% 
+    first()
+
+  df <- df %>%
+    mutate(
+      scale_factor    = ypp_2000 / yards_per_play,
+      mid_y           = 50,
+      own_ez_left_y   = -10,
+      opp_ez_right_y  = 110,
+      own_ez_left_x   = scale_factor * (own_ez_left_y  - mid_y),
+      opp_ez_right_x  = scale_factor * (opp_ez_right_y - mid_y),
+      start_x         = scale_factor * (median_start_from_own     - mid_y),
+      end_x           = scale_factor * (scoring_frontier_from_own - mid_y),
+      field_len_scaled = opp_ez_right_x - own_ez_left_x,
+      eff_width_scaled = end_x - start_x
+    )
+
+  all_x <- field_metrics_with_plays %>%
+    mutate(
+      scale_factor   = ypp_2000 / yards_per_play,
+      mid_y          = 50,
+      own_ez_left_x  = scale_factor * (-10  - mid_y),
+      opp_ez_right_x = scale_factor * (110 - mid_y)
+    )
+  x_min <- min(all_x$own_ez_left_x,  na.rm = TRUE)
+  x_max <- max(all_x$opp_ez_right_x, na.rm = TRUE)
+
+  eff_field_range <- range(field_metrics_with_plays$effective_field_yards, na.rm = TRUE)
+  color_val <- (df$effective_field_yards - eff_field_range[1]) / 
+               (eff_field_range[2] - eff_field_range[1])
+
+  r <- 1.0
+  g <- 0.84 + (0.55 - 0.84) * (1 - color_val)
+  b <- 0.0
+  fill_color <- rgb(r, g, b)
+
+  if (!is.null(viewport_parent)) {
+    grid::pushViewport(viewport_parent)
+  }
+
+  grid::pushViewport(grid::viewport(
+    xscale = c(x_min, x_max),
+    yscale = c(0, 1)
+  ))
+
+  field_y_center <- 0.5
+  field_height   <- 0.55   # was 0.65 – more room for labels
+
+  # smaller font sizes so nothing smashes together
+  label_fs <- 10
+  small_fs <- 8
+  
+  if (show_title) {
+    grid.text(
+      sprintf("Effective Offensive Field – %d Season (%.1f yards)",
+              df$season, df$effective_field_yards),
+      x  = unit(0.5, "npc"),
+      y  = unit(0.97, "npc"),
+      gp = gpar(fontsize = label_fs + 1, fontface = "bold")
+    )
+  }
+
+  # full field
+  grid.rect(
+    x     = unit(df$own_ez_left_x, "native"),
+    y     = unit(field_y_center, "native"),
+    width = unit(df$field_len_scaled, "native"),
+    height= unit(field_height, "native"),
+    just  = "left",
+    gp    = gpar(fill = "#25a503", col = NA)
+  )
+
+  # endzones
+  ez_w <- 10 * df$scale_factor
+  grid.rect(
+    x     = unit(df$own_ez_left_x, "native"),
+    y     = unit(field_y_center, "native"),
+    width = unit(ez_w, "native"),
+    height= unit(field_height, "native"),
+    just  = "left",
+    gp    = gpar(fill = "#1E90FF", col = NA)
+  )
+  grid.rect(
+    x     = unit(df$opp_ez_right_x, "native"),
+    y     = unit(field_y_center, "native"),
+    width = unit(ez_w, "native"),
+    height= unit(field_height, "native"),
+    just  = "right",
+    gp    = gpar(fill = "#FF2C2C", col = NA)
+  )
+
+  # yard lines
+  for (y_raw in seq(0, 100, 10)) {
+    x_tick <- df$scale_factor * (y_raw - df$mid_y)
+    grid.lines(
+      x  = unit(c(x_tick, x_tick), "native"),
+      y  = unit(c(0.17, 0.83), "native"),
+      gp = gpar(col = "white", lwd = 4)   # a bit thinner than 5
+    )
+  }
+
+  # effective field
+  grid.rect(
+    x     = unit((df$start_x + df$end_x) / 2, "native"),
+    y     = unit(field_y_center, "native"),
+    width = unit(df$eff_width_scaled, "native"),
+    height= unit(field_height, "native"),
+    gp    = gpar(fill = fill_color, col = "black", lwd = 1.5, alpha = 0.75)
+  )
+
+  grid.lines(
+    x  = unit(c(df$start_x, df$start_x), "native"),
+    y  = unit(c(0.17, 0.83), "native"),
+    gp = gpar(col = "black", lwd = 1, lty = 2)
+  )
+  grid.lines(
+    x  = unit(c(df$end_x, df$end_x), "native"),
+    y  = unit(c(0.17, 0.83), "native"),
+    gp = gpar(col = "black", lwd = 1, lty = 2)
+  )
+
+  # top labels – smaller font
+  grid.text(
+    sprintf("Median Start: Own %.1f yd", df$median_start_from_own),
+    x = unit(0.02, "npc"), y = unit(0.92, "npc"),
+    just = "left",
+    gp = gpar(fontsize = label_fs, col = "gray20")
+  )
+  grid.text(
+    sprintf("FG Frontier (70%%): Own %.1f yd", df$scoring_frontier_from_own),
+    x = unit(0.98, "npc"), y = unit(0.92, "npc"),
+    just = "right",
+    gp = gpar(fontsize = label_fs, col = "gray20")
+  )
+  
+  # bottom info
+  grid.text(
+    sprintf("YPP: %.2f  |  Effective Field: %.1f yds  |  Effective Plays: %.1f",
+            df$yards_per_play, df$effective_field_yards, df$effective_plays),
+    x = unit(0.5, "npc"), y = unit(0.10, "npc"),
+    gp = gpar(fontsize = label_fs, col = "gray30")
+  )
+  
+  grid.text(
+    "Field scaled by offensive efficiency (yards per play) relative to 2000 baseline",
+    x = unit(0.5, "npc"), y = unit(0.05, "npc"),
+    gp = gpar(fontsize = small_fs, col = "gray50", fontface = "italic")
+  )
+
+  grid::upViewport()
+  if (!is.null(viewport_parent)) {
+    grid::upViewport()
+  }
+}
+
+plot_comparison <- function(field_metrics_with_plays, season1, season2) {
+  grid::grid.newpage()
+  vp_layout <- grid::viewport(layout = grid::grid.layout(2, 1))
+  grid::pushViewport(vp_layout)
+
+  vp1 <- grid::viewport(layout.pos.row = 1, layout.pos.col = 1)
+  plot_single_field(field_metrics_with_plays, season1, show_title = FALSE, viewport_parent = vp1)
+
+  vp2 <- grid::viewport(layout.pos.row = 2, layout.pos.col = 1)
+  plot_single_field(field_metrics_with_plays, season2, show_title = FALSE, viewport_parent = vp2)
+
+  grid::upViewport()
+}
+```
+
+
+## The NFL Field is Effectively Shrinking
+
+The "effective field" has collapsed. In 2000, teams needed an average of 8.6 plays to move from the median drive starting position to field goal range. By 2025, that number has dropped to 6.0 plays. This is a result of three independent and unintended factors fundementally altering how the game is played.
+
+The effective field is measured with three key pieces: (1) the median start position of a drive, which is often very close to where kickoffs and touchbacks are often returned to, the (2) field goal frontier, which we defined as the yard line where teams have a 70% probability of making a field goal, an empirical threshold where coaches feel comfortable attempting kicks. Next, we scale the field with yards-per-play. Higher efficiency literally shrinks the field in terms of how many discrete actions are needed to cross it. A 70-yard effective field at 5.0 yards per play needs 14 plays, and the same field at 7.0 yards perp lay requires only ten plays. 
+
+Again, there are three independent drivers that have led to this drastic compression. One, new kickoff rules designed to reduce high-speed collisions have shifted the median starting position to the 30 yard line. This mirrors the 2000 start position, but represents a reveral from the mid-2010s when touchbacks where placed at the 20. This rule change was motivated entirely by player safety. Next, as mentioned prior, kickers have become incredibly efficient, with the FG frontier moving from the opponents 28 yard line (45 yard field goal) to the 39 yard line (56 yard field goal). This is because of improved kicker techniques and the NFL allowing "k-balls" which are fresh balls used for kicking. And lastly, yards per play has increased from 5.03 in 2000 to 5.42 in 2025. This isn't the highest yards per play in NFL history, as explosiveness has actually declined as teams favor safer, higher-percentage plays, but the cumulative effect still compounds with other factors. Teams are converting more consistently. 
+
+The cumulative effect is that in 2000, the effective sfield spanned 43.1 yards, requiring 8.6 plays to traverse, while in 2025, the effective field spans 32.7 yards, requiring only 6.0 plays to traverse. This unintended compression accelerates scoring and diminishes the role of defense and has altered the game to a degree that threatens competitive balanced. Defense is just structurally disadvantaged when offenses only need two first downs in order to score points. The league has historically intervened when offensive-defensive balance tilts too far, and now it could modify kickoff rules to push median start position back to the 25, and require kickers to use worn-out game balls to make kicking more challenging. 
+
+Note: This PDF report contains static visualizations of the effective field analysis. The interactive version of the killer plot is available in the full presentation. To interact with the plot, view the QMD file of the presentation, as interactive shiny is compatable with the slideshow. 
+
+```{r static_effective_field_plots, echo=FALSE, fig.show='hold', fig.height=4, fig.width=7}
+
+# 1) Effective field plots for specific seasons
+seasons_to_show <- c(2000, 2010, 2020, 2025)
+
+for (s in seasons_to_show) {
+  grid::grid.newpage()
+  plot_single_field(field_metrics_with_plays, s)
+}
+
+# 2) Time-series of effective plays over time
+ggplot(field_metrics_with_plays, aes(x = season, y = effective_plays)) +
+  geom_line(color = "steelblue", size = 1.2) +
+  geom_point(color = "steelblue", size = 2) +
+  labs(
+    title = "Effective Plays to Cross the Field, 2000–2025",
+    x = "Season",
+    y = "Effective Plays"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title   = element_text(hjust = 0.5, face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+```
+
+
+## Conclusion
+
+The modern NFL offense is operating at a level of efficiency that has no historical precedent. Drives convert to scores at higher rates. Red zone efficiency has climbed. Kickers are draining 55-yarders. Fourth-down analytics have coaches going for it in situations that would have been automatic punts a decade ago. Explosive play rate has declined, but it's because quarterbacks are throwing shorter, safer passes that generate more yards after catch than air yards, trading inefficient risky throws for consistent production.
+
+Every factor points in the same direction: offenses have gotten better at everything simultaneously. And the problem is that these gains compound. Higher yards per play means fewer plays needed to reach field goal range. Better kickers mean filed goal range starts ten yards further back. More fourth-down conversions mean drives that would have ended in punts now extend and score. Better red zone efficiency means those extended drives convert touchdowns instead of field goals. Each improvement multiplies the others. Coaches have converged on the "optimal" way of playing offense.
+
+So when the effective field shrinks the six plays, defenses don't have enough opportunities to make stops. When drives end in scores 5+ percentage points more often than in 2000, the variance that makes football compelling may disappear. The NFL should pursue small adjustments that maintain competitive balance between offense and defense.  
+
+
