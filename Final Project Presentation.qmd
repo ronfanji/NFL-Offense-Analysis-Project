@@ -1,0 +1,1710 @@
+---
+title: "NFL Project Presentation"
+subtitle: "Jason Lin, Matthew Goetting, Patrick Shukis, and Ryan Ji"
+format:
+  revealjs: 
+    # embed-resources: true
+    slide-number: true
+    chalkboard: 
+      buttons: false
+    preview-links: auto
+    css: styles.css
+    footer: STAT 405 - Group 14
+server: shiny
+---
+```{r}
+#| echo: false
+library(nflfastR)
+library(nflplotR)
+library(nflreadr)
+library(dplyr)
+library(purrr)
+library(DBI)
+library(RSQLite)
+library(readr)
+library(ggplot2)
+library(ggrepel)
+library(tidyr)
+library(tidyverse)
+library(patchwork)
+library(scales)
+library(broom)
+
+dcon <- dbConnect(RSQLite::SQLite(), "nfl_pbp.sqlite")
+
+years <- 2000:2025
+
+pbp <- map_df(years, function(y) {
+  message("Loading ", y, "...")
+  nflfastR::load_pbp(y)
+})
+
+pbp_2000 <- dbGetQuery(dcon, "SELECT * FROM pbp_2000")
+pbp_2024 <- dbGetQuery(dcon, "SELECT * FROM pbp_2024")
+
+nfl_theme <- theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 11, hjust = 0, color = "gray40"),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_line(color = "gray85", linewidth = 0.4),
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  )
+```
+
+
+## Background
+::: incremental
+-   All of us have interests corresponding with professional sports.
+-   Of course, we wanted to cater our final project centering around sports statistics.
+-   NFLFastR scrapes public NFL play-by-play data into a reliable R package
+-   NFLFastR is an ideal foundation for studying how offensive strategy has evolved in the league
+:::
+
+## History
+::: incremental
+-   The early years of the league were built around the run game. 
+-   Over time, the NFL introduced a series of rules that helped open up the field, protect receivers
+and quarterbacks, and encourage more passing.
+-   Kicker Accuracy improved over time along with various rule changes, affecting how kicking is utilized
+in offensive strategy
+-   As passing efficiency skyrocketed, offensive efficiency became more of a numbers game, prioritizing
+positive value per play 
+:::
+
+## Our Mission
+
+::: incremental
+-   Understand the changes in offensive strategy in the time period between 2000 to 2025
+-   Discern the effects of certain rule changes on NFL offense
+-   Present our findings to NFL Executives, Teams, and Analysts
+:::
+
+## Approach
+::: incremental
+-	Use NFLFastR play-by-play data to build a consistent and reproducible dataset
+-	Define key offensive metrics for comparison across eras
+-	Create visualizations that highlight league-wide shifts in behavior rather than team-specific noise
+-	Interpret results in the context of rule changes and broader analytical trends in football
+:::
+
+## Generating Our SQLite
+```r
+#| echo: true
+years <- 2000:2025  
+dcon <- dbConnect(RSQLite::SQLite(), "nfl_pbp.sqlite")
+
+# creates tables for specific years (2000-2025)
+for(year in years){
+  message("Loading ", year, "...")
+  pbp <- nflfastR::load_pbp(year)
+  table_name <- paste0("pbp_", year)
+  
+  dbWriteTable(dcon, table_name, pbp, overwrite = TRUE)
+  
+  message("Created Table: ", table_name)
+}
+
+# creates the general play_by_play data from all years
+all_queries <- paste0("SELECT * FROM pbp_", years)
+union_query <- paste(all_queries, collapse = " UNION ALL ")
+
+dbExecute(dcon, paste0("CREATE TABLE play_by_play AS ", union_query))
+
+```
+
+## Offensive Conversion
+::: incremental
+-    Drives now end in touchdowns and field goals more often than in the early 2000s
+-    Red zone execution have increased across teams
+-    Modern offenses waste fewer possessions through punts and turnovers
+:::
+
+## Changes in NFL Drives Between Eras (2000-2005 and 2020-2025)
+```{r}
+query_drive_change <- "
+WITH period1 AS (
+    SELECT fixed_drive_result, COUNT(*) as count_2000
+    FROM (
+        SELECT game_id, drive, fixed_drive_result
+        FROM play_by_play
+        WHERE season BETWEEN 2000 AND 2004
+            AND fixed_drive_result NOT IN ('End of half', 'Safety', 'Opp touchdown')
+        GROUP BY game_id, drive, fixed_drive_result
+    )
+    GROUP BY fixed_drive_result
+),
+period2 AS (
+    SELECT fixed_drive_result, COUNT(*) as count_2020
+    FROM (
+        SELECT game_id, drive, fixed_drive_result
+        FROM play_by_play
+        WHERE season BETWEEN 2020 AND 2025
+            AND fixed_drive_result NOT IN ('End of half', 'Safety', 'Opp touchdown')
+        GROUP BY game_id, drive, fixed_drive_result
+    )
+    GROUP BY fixed_drive_result
+)
+SELECT 
+    p1.fixed_drive_result,
+    100.0 * p1.count_2000 / (SELECT SUM(count_2000) FROM period1) as pct_2000,
+    100.0 * p2.count_2020 / (SELECT SUM(count_2020) FROM period2) as pct_2020,
+    100.0 * p2.count_2020 / (SELECT SUM(count_2020) FROM period2) - 
+    100.0 * p1.count_2000 / (SELECT SUM(count_2000) FROM period1) as diff
+FROM period1 p1
+JOIN period2 p2 ON p1.fixed_drive_result = p2.fixed_drive_result
+ORDER BY ABS(diff) DESC
+"
+
+
+drive_change_data <- dbGetQuery(dcon, query_drive_change)
+
+ggplot(drive_change_data, aes(x = reorder(fixed_drive_result, diff), y = diff, fill = diff > 0)) +
+    geom_bar(stat = "identity", width = 0.7) +
+    geom_hline(yintercept = 0, color = "black", linewidth = 0.8) +
+    scale_fill_manual(
+        values = c("FALSE" = "#E74C3C", "TRUE" = "#27AE60"),
+        labels = c("Decreased", "Increased"),
+        name = NULL
+    ) +
+    coord_flip() +
+    labs(
+        title = "How NFL Drives End Has Changed Dramatically",
+        subtitle = "Percentage point change in drive outcomes (2020-2025 vs 2000-2005)",
+        x = NULL,
+        y = "Percentage Point Change"
+    ) + nfl_theme
+
+
+```
+
+## Comparing Red Zone Touchdown Efficiency
+```{r}
+redzone_2024 <- pbp_2024 %>%
+  filter(!is.na(posteam), yardline_100 <= 20, yardline_100 > 0) %>%
+  group_by(posteam, drive) %>%
+  slice(1) %>%
+  ungroup() %>%
+  group_by(posteam) %>%
+  summarise(
+    rz_trips = n(),
+    rz_tds = sum(fixed_drive_result == "Touchdown", na.rm = TRUE),
+    rz_td_pct = rz_tds / rz_trips
+  )
+
+# Get 2024 standings
+standings_2024 <- pbp_2024 %>%
+  filter(!is.na(posteam), !is.na(home_team), !is.na(away_team)) %>%
+  group_by(game_id, posteam) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(
+    win = case_when(
+      posteam == home_team & result > 0 ~ 1,
+      posteam == away_team & result < 0 ~ 1,
+      TRUE ~ 0
+    )
+  ) %>%
+  group_by(posteam) %>%
+  summarise(wins = sum(win)) %>%
+  arrange(wins)
+
+redzone_2024 <- redzone_2024 %>%
+  left_join(standings_2024, by = "posteam") %>%
+  arrange(wins) %>%
+  mutate(posteam = factor(posteam, levels = posteam))
+
+# 2000 Red Zone Efficiency
+redzone_2000 <- pbp_2000 %>%
+  filter(!is.na(posteam), yardline_100 <= 20, yardline_100 > 0) %>%
+  group_by(posteam, drive) %>%
+  slice(1) %>%
+  ungroup() %>%
+  group_by(posteam) %>%
+  summarise(
+    rz_trips = n(),
+    rz_tds = sum(fixed_drive_result == "Touchdown", na.rm = TRUE),
+    rz_td_pct = rz_tds / rz_trips
+  )
+
+# Get 2000 standings
+standings_2000 <- pbp_2000 %>%
+  filter(!is.na(posteam), !is.na(home_team), !is.na(away_team)) %>%
+  group_by(game_id, posteam) %>%
+  slice(1) %>%
+  ungroup() %>%
+  mutate(
+    win = case_when(
+      posteam == home_team & result > 0 ~ 1,
+      posteam == away_team & result < 0 ~ 1,
+      TRUE ~ 0
+    )
+  ) %>%
+  group_by(posteam) %>%
+  summarise(wins = sum(win)) %>%
+  arrange(wins)
+
+redzone_2000 <- redzone_2000 %>%
+  left_join(standings_2000, by = "posteam") %>%
+  arrange(wins) %>%
+  mutate(posteam = factor(posteam, levels = posteam))
+
+# Calculate averages
+avg_2024 <- mean(redzone_2024$rz_td_pct, na.rm = TRUE)
+avg_2000 <- mean(redzone_2000$rz_td_pct, na.rm = TRUE)
+
+# Get combined y limits
+y_limits_4 <- c(
+  min(c(redzone_2024$rz_td_pct, redzone_2000$rz_td_pct), na.rm = TRUE),
+  max(c(redzone_2024$rz_td_pct, redzone_2000$rz_td_pct), na.rm = TRUE)
+)
+
+# Create plots
+g_2000_rz <- redzone_2000 %>%
+  ggplot(aes(x = posteam, y = rz_td_pct)) + 
+  geom_segment(aes(xend = posteam, y = 0, yend = rz_td_pct)) +
+  geom_nfl_logos(aes(team_abbr = posteam), width = .036) +
+  geom_hline(yintercept = avg_2000, linetype = "dotted", color = "red", linewidth = 0.8) +
+  annotate("text", x = 1, y = avg_2000, label = sprintf("League Avg: %.1f%%", avg_2000 * 100), 
+           hjust = 0, vjust = -0.5, color = "red", size = 3.5, fontface = "bold") +
+  coord_cartesian(ylim = y_limits_4) +
+  labs(
+    title = "2000 Season",
+    x = NULL,
+    y = "Red Zone TD %"
+  ) + 
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_line(color = "gray85", linewidth = 0.4),
+    panel.grid.minor = element_blank(),
+    legend.position = "right",
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+
+g_2024_rz <- redzone_2024 %>%
+  ggplot(aes(x = posteam, y = rz_td_pct)) + 
+  geom_segment(aes(xend = posteam, y = 0, yend = rz_td_pct)) +
+  geom_nfl_logos(aes(team_abbr = posteam), width = .036) +
+  geom_hline(yintercept = avg_2024, linetype = "dotted", color = "red", linewidth = 0.8) +
+  annotate("text", x = 1, y = avg_2024, label = sprintf("League Avg: %.1f%%", avg_2024 * 100), 
+           hjust = 0, vjust = -0.5, color = "red", size = 3.5, fontface = "bold") +
+  coord_cartesian(ylim = y_limits_4) +
+  labs(
+    title = "2024 Season",
+    x = NULL,
+    y = "Red Zone TD %"
+  ) + 
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_line(color = "gray85", linewidth = 0.4),
+    panel.grid.minor = element_blank(),
+    legend.position = "right",
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank()
+  )
+
+# Combine plots
+combined_plots_4 <- (g_2000_rz | g_2024_rz) +
+  plot_annotation(
+    title = "Red Zone Touchdown Efficiency",
+    subtitle = "2000 vs. 2024 (Sorted by Wins)",
+    theme = theme(
+      plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+      plot.subtitle = element_text(size = 12, hjust = 0.5, color = "gray40")
+    )
+  )
+
+combined_plots_4
+
+
+```
+
+
+
+## Kicking Throughout the NFL
+::: incremental
+-    Field Goals have become a staple of the modern NFL offensive game
+-    Helps secure easier points when touchdowns aren't guaranteed
+-    Gradual evolution throughout the years
+-    Rule Changes have affected kicking instantaneously
+:::
+
+## Upward Long Range Field Goal Trends
+```{r}
+nfl_theme <- theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0),
+    plot.subtitle = element_text(size = 11, hjust = 0, color = "gray40"),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_line(color = "gray85", linewidth = 0.4),
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  )
+
+query1 <- "
+WITH long_fg_attempts AS (
+    SELECT 
+        season,
+        COUNT(*) as fg_attempts_55plus
+    FROM play_by_play
+    WHERE play_type = 'field_goal' 
+        AND kick_distance >= 55
+    GROUP BY season
+),
+total_games AS (
+    SELECT 
+        season,
+        COUNT(DISTINCT game_id) as total_games
+    FROM play_by_play
+    GROUP BY season
+)
+SELECT 
+    t.season,
+    COALESCE(l.fg_attempts_55plus, 0) as fg_attempts_55plus,
+    t.total_games,
+    CAST(COALESCE(l.fg_attempts_55plus, 0) AS FLOAT) / t.total_games as attempts_per_game
+FROM total_games t
+LEFT JOIN long_fg_attempts l ON t.season = l.season
+ORDER BY t.season
+"
+
+fg_attempts_data <- dbGetQuery(dcon, query1)
+
+
+query2 <- "
+SELECT 
+    season,
+    COUNT(*) as total_attempts,
+    SUM(CASE WHEN field_goal_result = 'made' THEN 1 ELSE 0 END) as made,
+    CAST(SUM(CASE WHEN field_goal_result = 'made' THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*) * 100 as success_rate
+FROM play_by_play
+WHERE play_type = 'field_goal' 
+    AND kick_distance >= 55
+GROUP BY season
+ORDER BY season
+"
+
+fg_success_data <- dbGetQuery(dcon, query2)
+combined_data <- merge(fg_attempts_data, fg_success_data, by = "season")
+
+# calculate scaling factor
+coeff <- 100 / max(combined_data$attempts_per_game)
+
+ggplot(combined_data, aes(x = season)) +
+    geom_line(aes(y = attempts_per_game, color = "Attempts per Game"), lwd = 1.2) +
+    geom_point(aes(y = attempts_per_game, color = "Attempts per Game"), size = 3) +
+    geom_line(aes(y = success_rate / coeff, color = "Success Rate"), lwd = 1.2) +
+    geom_point(aes(y = success_rate / coeff, color = "Success Rate"), size = 3) +
+    scale_y_continuous(
+        name = "Attempts Per Game",
+        sec.axis = sec_axis(~ . * coeff, name = "Success Rate (%)")
+    ) +
+    scale_color_manual(values = c("Attempts per Game" = "steelblue", 
+                                   "Success Rate" = "darkgreen")) +
+    labs(
+        title = "55+ Yard Field Goal Attempts & Success Rate",
+        subtitle = "NFL Regular Season (2000-2025)",
+        x = "Season",
+        color = ""
+    ) +
+    nfl_theme +
+    theme(legend.position = "bottom")
+
+```
+
+## A Dip in the Extra Point Conversion Rate
+```{r}
+library(stringr)
+
+query <- "
+SELECT
+  season,
+  SUM(CASE WHEN extra_point_attempt = 1 THEN 1 ELSE 0 END) AS xp_attempts,
+  SUM(CASE WHEN extra_point_attempt = 1 AND extra_point_result = 'good' THEN 1 ELSE 0 END) AS xp_made
+FROM play_by_play
+GROUP BY season
+HAVING season BETWEEN 2000 AND 2024
+ORDER BY season
+"
+
+xp_df <- dbGetQuery(dcon, query) %>% mutate(xp_pct = xp_made/xp_attempts)
+mean_xp_before <- mean(xp_df$xp_pct[xp_df$season >= 2000 & xp_df$season <= 2014], na.rm = TRUE)
+mean_xp_after <- mean(xp_df$xp_pct[xp_df$season >= 2015], na.rm = TRUE)
+
+ggplot(xp_df, aes(x = season, y = xp_pct)) +
+  geom_line(size = 1.2, color = "mediumorchid3") +
+  geom_point(size = 3, color = "mediumpurple4") +
+  
+  geom_segment(
+    aes(x = 2000, xend = 2014, y = mean_xp_before, yend = mean_xp_before),
+    color = "red",
+    linetype = "dashed",
+    linewidth = 1) +
+  annotate("text",
+           x = min(xp_df$season) + 5,
+           y = mean_xp_before + 0.002,
+           label = paste0("Mean: ", scales::percent(mean_xp_before, accuracy = 0.1)),
+           vjust = -1,
+           color = "red",
+           size = 4) +
+  
+  geom_segment(
+    aes(x = 2015, xend = 2024, y = mean_xp_after, yend = mean_xp_after),
+    color = "blue",
+    linetype = "dashed",
+    linewidth = 1) +
+  annotate("text",
+           x = max(xp_df$season) - 5,
+           y = mean_xp_after + 0.002,
+           label = paste0("Mean: ", scales::percent(mean_xp_after, accuracy = 0.1)),
+           vjust = -1,
+           color = "blue",
+           size = 4) +
+  
+  scale_y_continuous(labels = percent_format(accuracy = 0.1)) +
+  scale_x_continuous(breaks = seq(2000, 2024, by = 2)) +
+  labs(
+    title = "NFL Extra Point Conversion Rate by Season (2000–2024)",
+    x = "Season",
+    y = "Extra Point Success Rate"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14)
+  )
+
+```
+
+## Late Down Decisions
+::: incremental
+-    Teams have become more aggressive with fourth down decisions
+-    Effiency and offense have evolved, even in clutch time
+:::
+
+## Crucial Plays in Crunch Time
+```{r}
+query_4th <- "
+WITH fourth_down AS (
+    SELECT
+        season,
+        game_id,
+        play_id,
+        posteam,
+        defteam,
+        down,
+        ydstogo,
+        yardline_100,
+        game_seconds_remaining,
+        score_differential,
+        play_type,
+        CASE 
+            WHEN play_type IN ('run', 'pass') THEN 1   -- go for it
+            WHEN play_type IN ('punt', 'field_goal') THEN 0  -- kick
+            ELSE NULL
+        END AS go_for_it
+    FROM play_by_play
+    WHERE down = 4
+      AND play_type IN ('run', 'pass', 'punt', 'field_goal')
+)
+SELECT
+    season,
+    game_id,
+    play_id,
+    posteam,
+    defteam,
+    ydstogo,
+    yardline_100,
+    game_seconds_remaining,
+    score_differential,
+    go_for_it
+FROM fourth_down
+WHERE go_for_it IS NOT NULL
+ORDER BY season, game_id, play_id
+"
+
+fourth_down_data <- dbGetQuery(dcon, query_4th)
+
+# Make sure outcome is 0/1 numeric
+fourth_down_data$go_for_it <- as.integer(fourth_down_data$go_for_it)
+
+
+vars <- c("game_seconds_remaining", "yardline_100",
+          "score_differential", "ydstogo")
+
+fit_season_model <- function(data, season_value) {
+  df <- data[data$season == season_value, c("go_for_it", vars)]
+  df <- na.omit(df)
+  df[vars] <- lapply(df[vars], function(x) as.numeric(scale(x)))
+  
+  mod <- glm(
+    go_for_it ~ game_seconds_remaining + yardline_100 +
+      score_differential + ydstogo,
+    data = df,
+    family = binomial()
+  )
+  
+  tidy(mod) %>%
+    dplyr::filter(term != "(Intercept)") %>%
+    dplyr::mutate(
+      abs_estimate = abs(estimate),
+      # approximate 95% CI on |beta|
+      lower_abs = pmax(0, abs_estimate - 1.96 * std.error),
+      upper_abs = abs_estimate + 1.96 * std.error,
+      season = season_value
+    )
+}
+
+seasons_to_compare <- c(2000, 2024)
+
+coef_list <- lapply(seasons_to_compare, function(s) {
+  fit_season_model(fourth_down_data, s)
+})
+
+coef_both <- dplyr::bind_rows(coef_list)
+
+coef_both$term <- dplyr::recode(
+  coef_both$term,
+  "game_seconds_remaining" = "Time Remaining (s)",
+  "yardline_100"           = "Field Position to End Zone (yards)",
+  "score_differential"     = "Score Differential",
+  "ydstogo"                = "Yards to Go"
+)
+
+p_dodged <- ggplot(coef_both,
+                   aes(x = term,
+                       y = abs_estimate,
+                       fill = factor(season))) +
+  geom_col(position = position_dodge(width = 0.9)) +
+  geom_errorbar(aes(ymin = lower_abs, ymax = upper_abs),
+                position = position_dodge(width = 0.9),
+                width = 0.2) +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "|Standardized coefficient| (log-odds per 1 SD)",
+    fill = "Season",
+    title = "Change in relative importance of 4th-down factors\n(with 95% CIs)"
+  ) + nfl_theme
+
+print(p_dodged)
+
+```
+
+## Rush to Pass Yards in Crunch Time
+```{r}
+five_min <- pbp_2024 %>%
+  filter(play_type == "pass" | play_type == "run", !is.na(play_type), 
+         game_seconds_remaining < 301, score_differential < 0) %>%
+  group_by(posteam) %>%
+  summarise(
+    rush_avg = mean(yards_gained[play_type == "run"], na.rm = TRUE),
+    pass_avg = mean(yards_gained[play_type =="pass"], na.rm = TRUE),
+    rush_plays = sum(play_type == "run"),
+    pass_plays = sum(play_type == "pass"),
+    comp_pct = sum(complete_pass == 1, na.rm = TRUE) / sum(play_type == "pass")
+  )
+
+#2000
+five_min_2 <- pbp_2000 %>%
+  filter(play_type == "pass" | play_type == "run", !is.na(play_type), 
+         game_seconds_remaining < 301, score_differential < 0) %>%
+  group_by(posteam) %>%
+  summarise(
+    rush_avg = mean(yards_gained[play_type == "run"], na.rm = TRUE),
+    pass_avg = mean(yards_gained[play_type =="pass"], na.rm = TRUE),
+    rush_plays = sum(play_type == "run"),
+    pass_plays = sum(play_type == "pass"),
+    comp_pct = sum(complete_pass == 1, na.rm = TRUE) / sum(play_type == "pass")
+  )
+
+# Get combined axis limits
+x_limits_2 <- c(
+  min(c(five_min$pass_avg, five_min_2$pass_avg), na.rm = TRUE),
+  max(c(five_min$pass_avg, five_min_2$pass_avg), na.rm = TRUE)
+)
+y_limits_2 <- c(
+  min(c(five_min$rush_avg, five_min_2$rush_avg), na.rm = TRUE),
+  max(c(five_min$rush_avg, five_min_2$rush_avg), na.rm = TRUE)
+)
+
+# Save plots as objects
+g_2000_five <- ggplot(five_min_2, aes(x = pass_avg, y = rush_avg)) +
+  geom_nfl_logos(aes(team_abbr = posteam), width = .03) +
+  geom_text_repel(aes(label = posteam), size = 2.5) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_line(color = "gray85", linewidth = 0.4),
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  ) +
+  coord_cartesian(xlim = x_limits_2, ylim = y_limits_2) +
+  labs(
+    title = "2000 Season",
+    x = "Average Pass Yards",
+    y = "Average Rush Yards"
+  )
+
+g_2024_five <- ggplot(five_min, aes(x = pass_avg, y = rush_avg)) +
+  geom_nfl_logos(aes(team_abbr = posteam), width = .03) +
+  geom_text_repel(aes(label = posteam), size = 2.5) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    panel.border = element_blank(),
+    axis.line = element_line(color = "black"),
+    panel.grid.major = element_line(color = "gray85", linewidth = 0.4),
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  ) +
+  coord_cartesian(xlim = x_limits_2, ylim = y_limits_2) +
+  labs(
+    title = "2024 Season",
+    x = "Average Pass Yards",
+    y = "Average Rush Yards"
+  )
+
+combined_plots_2 <- (g_2000_five | g_2024_five) +
+  plot_annotation(
+    title = "Average Rush vs. Pass Yards Per Play by Trailing Teams in Final 5 Minutes",
+    subtitle = "2000 vs. 2024",
+    theme = theme(
+      plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+      plot.subtitle = element_text(size = 12, hjust = 0.5, color = "gray40")
+    )
+  )
+
+combined_plots_2
+
+```
+
+## Passing Differentials in the Modern Era
+::: incremental
+-   Recently, many offenses have resorted to shorter passes. 
+-   Shorter passes are more consistent in comparison to longer, riskier passes.
+-   The sheer volume of passes have grown greatly between eras.
+-   Change in the pace of the game as well as rule changes
+:::
+
+## Passing Play Proportions Across Eras
+```{r}
+
+# 1) Pull data and define eras
+query <- "
+SELECT 
+    season,
+    CASE 
+        WHEN passing_yards > 60 THEN 60      -- cap very long plays
+        ELSE passing_yards 
+    END AS passing_yards
+FROM play_by_play
+WHERE passing_yards IS NOT NULL
+  AND season BETWEEN 2000 AND 2024
+"
+
+pbp_pass <- dbGetQuery(dcon, query) |>
+  mutate(
+    era = case_when(
+      season <= 2007 ~ "2000–2007 (Run Heavy)",
+      season <= 2015 ~ "2008–2015 (Spread Era)",
+      TRUE           ~ "2016–2024 (RPO / Analytics)"
+    )
+  )
+
+# 2) Bin passing yards
+bin_width  <- 5
+min_yards  <- -10
+max_yards  <- 60
+
+pbp_pass <- pbp_pass |>
+  mutate(
+    yard_bin = cut(
+      passing_yards,
+      breaks = seq(min_yards, max_yards, by = bin_width),
+      include.lowest = TRUE,
+      right = TRUE      # include the upper bound so 60 isn't NA
+    )
+  ) |>
+  filter(!is.na(yard_bin))
+
+# 3) Count plays per era + bin, and convert to share of ALL pass plays
+bin_summary <- pbp_pass |>
+  group_by(era, yard_bin) |>
+  summarise(n = n(), .groups = "drop") |>
+  mutate(
+    share_all_plays = n / sum(n)
+  )
+
+# 4) Plot: stacked-time histogram
+ggplot(bin_summary, aes(x = yard_bin, y = share_all_plays, fill = era)) +
+  geom_col(color = "white", alpha = 0.9) +
+  scale_y_continuous(
+    labels = percent_format(accuracy = 1),
+    expand = c(0, 0.002)
+  ) +
+  scale_fill_brewer(palette = "Set2") +
+  labs(
+    title    = "How Passing Play Outcomes Changed Across Eras (2000–2024)",
+    subtitle = "Histogram of passing yards per play, with era volumes stacked",
+    x        = "Passing Yards per Play (5-yard bins, capped at 60)",
+    y        = "Share of All Pass Plays",
+    fill     = "Era"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold"),
+    axis.text.x      = element_text(angle = 45, hjust = 1),
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+## Changes in Pass vs. Run Yardage
+```{r}
+
+pbp_filtered <- pbp %>%
+  filter(season %in% c(2000, 2024),
+         play_type %in% c("run", "pass"),
+         !is.na(yards_gained))
+
+# ---- 2. Score buckets ----
+pbp_bucketed <- pbp_filtered %>%
+  mutate(
+    score_diff = posteam_score - defteam_score,
+    score_bucket = case_when(
+      score_diff <= -15 ~ "Losing by 15+",
+      score_diff <= -8  ~ "Losing by 8–14",
+      score_diff <= -1  ~ "Losing by 1–7",
+      score_diff <= 7   ~ "Tied or Winning by 1–7",
+      score_diff <= 14  ~ "Winning by 8–14",
+      score_diff >= 15  ~ "Winning by 15+"
+    )
+  )
+
+# ---- 3. Avg yards per bucket ----
+summary_df <- pbp_bucketed %>%
+  group_by(season, score_bucket, play_type) %>%
+  summarise(
+    avg_yards = mean(yards_gained),
+    plays = n(),
+    .groups = "drop"
+  )
+
+# ---- 4. Overall seasonal averages (lines) ----
+overall_avgs <- pbp_bucketed %>%
+  group_by(season, play_type) %>%
+  summarise(overall_avg = mean(yards_gained), .groups = "drop")
+
+# ---- 5. Order buckets ----
+bucket_levels <- c(
+  "Losing by 15+",
+  "Losing by 8–14",
+  "Losing by 1–7",
+  "Tied or Winning by 1–7",
+  "Winning by 8–14",
+  "Winning by 15+"
+)
+
+summary_df$score_bucket <- factor(summary_df$score_bucket, levels = bucket_levels)
+
+
+# ---- 6. Build plot ----
+combined_plots_5 <- ggplot(summary_df, aes(
+  x = score_bucket,
+  y = avg_yards,
+  fill = play_type
+)) +
+  
+  # --- Bars ---
+  geom_col(position = "dodge", alpha = 0.75) +
+  
+  # --- Horizontal RED dashed lines (NO legend) ---
+  geom_hline(
+    data = overall_avgs,
+    aes(yintercept = overall_avg, group = play_type),
+    linetype = "dashed",
+    color = "black",
+    linewidth = 0.9,
+    inherit.aes = FALSE
+  ) +
+  
+  # --- RED text labels for each avg line ---
+  geom_text(
+    data = overall_avgs,
+    aes(
+      x = 1,
+      y = overall_avg,
+      label = paste0(
+        "Average ", season, " ", tools::toTitleCase(play_type),
+        " Yardage: ", round(overall_avg, 2)
+      )
+    ),
+    hjust = -0.05,
+    vjust = -0.3,
+    size = 3.6,
+    color = "black",
+    fontface = "bold",
+    inherit.aes = FALSE
+  ) +
+  
+  facet_wrap(~ season, ncol = 2, scales = "free_y") +
+  labs(
+    title = "Average Yards Gained by Play Type Across Score Situations (2000 vs 2024)",
+    x = "Game Situation (Score Bucket)",
+    y = "Average Yards Gained",
+    fill = "Play Type"
+  ) +
+  coord_cartesian(clip = "off") +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 20, hjust = 1),
+    plot.margin = margin(20, 40, 20, 20),
+    panel.grid.minor = element_blank()
+  )
+
+combined_plots_5
+
+```
+
+
+## Pass Distance in Quarterbacks
+```{r}
+
+# load rosters for quarterback names
+rosters <- nflreadr::load_rosters(2000:2024)
+
+qb_query <- "
+SELECT
+    passer_player_name,
+    season,
+    SUM(passing_yards) as total_pass_distance,
+    AVG(passing_yards) as avg_pass_distance
+FROM play_by_play
+WHERE passer_player_name IS NOT NULL
+  AND passing_yards IS NOT NULL
+  AND (season = 2000 OR season = 2024)
+GROUP BY 
+        passer_player_name,
+        season
+ORDER BY 
+        season,
+        total_pass_distance DESC,
+        avg_pass_distance DESC,
+        passer_player_name
+"
+
+# filter out most of the data
+qb_df <- dbGetQuery(dcon, qb_query)
+
+# use r filtering to find top 20 qbs in 2000 season and 2024 season solely
+top_qbs_2000 <- qb_df %>% filter(season == 2000) %>% head(20)
+top_qbs_2024 <- qb_df %>% filter(season == 2024) %>% head(20)
+
+# combine both years into one dataframe
+top_qbs <- bind_rows(top_qbs_2000, top_qbs_2024)
+
+# Use the combined table
+plot_df <- top_qbs %>%
+  mutate(
+    season = factor(season),
+    passer_player_name = as.factor(passer_player_name)
+  )
+
+# compute average values for lines
+avg_vals <- plot_df %>%
+  group_by(season) %>%
+  summarise(
+    mean_total = mean(total_pass_distance, na.rm = TRUE),
+    mean_avg   = mean(avg_pass_distance, na.rm = TRUE)
+  )
+
+ggplot(plot_df, aes(x = total_pass_distance,
+                    y = avg_pass_distance,
+                    color = season,
+                    label = passer_player_name)) +
+  geom_point(size = 4, alpha = 0.8) +
+  ggrepel::geom_text_repel(size = 2, max.overlaps = 20) +
+  scale_color_manual(
+    values = c("2000" = "blue", "2024" = "red")
+  ) +
+  
+    geom_vline(data = avg_vals,
+             aes(xintercept = mean_total, color = season),
+             linetype = "dashed", linewidth = 0.67) +
+
+  geom_hline(data = avg_vals,
+             aes(yintercept = mean_avg, color = season),
+             linetype = "dashed", linewidth = 0.67) +
+  
+  labs(
+    title = "QB Passing Yards: Total vs Average Yards (2000 vs 2024)",
+    subtitle = "Top 20 Quarterbacks Per Season",
+    x = "Total Passing Yards",
+    y = "Average Yards per Attempt",
+    color = "Season"
+  ) + nfl_theme
+
+```
+
+## Proportionality of Air Yards to YAC
+
+```{r}
+#| echo: false
+#| fig-width: 10
+#| fig-height: 4.5
+library(hexbin)
+library(nflreadr)
+library(ggplot2)
+library(scales)
+
+pct_query <- "
+WITH filtered AS (
+    SELECT *
+    FROM play_by_play
+    WHERE posteam IS NOT NULL
+      AND air_yards IS NOT NULL
+      AND yards_after_catch IS NOT NULL
+),
+season_summary AS (
+    SELECT
+        season,
+        SUM(air_yards) AS total_air_yards,
+        SUM(yards_after_catch) AS total_yac,
+        SUM(air_yards) + SUM(yards_after_catch) AS total_yards
+    FROM filtered
+    GROUP BY season
+)
+
+SELECT season,
+      'pct_air_yards' AS metric,
+      (total_air_yards * 1.0 / total_yards) AS value
+FROM season_summary
+      
+UNION ALL
+
+SELECT season,
+      'pct_yac' AS metric,
+      (total_yac * 1.0 / total_yards) AS value
+FROM season_summary
+"
+
+pct_df <- dbGetQuery(dcon, pct_query)
+pct_df <- pct_df %>%
+  transmute(
+    season,
+    value,
+    metric = recode(metric,
+                    "pct_yac" = "yac (%)",
+                    "pct_air_yards" = "air yards (%)")
+  )
+
+pct_df$metric <- factor(pct_df$metric,
+                        levels = c("yac (%)", "air yards (%)"))
+
+ggplot(pct_df, aes(x = factor(season), y = value, fill = metric)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = percent(value, accuracy = 0.1)),
+            position = position_stack(vjust = 0.5),
+            size = 3,
+            color = "black") +
+  labs(
+    title = "Proportion of Air Yards To Yards After Catch, by Season",
+    x = "Season",
+    y = "Yards"
+  ) +
+  scale_fill_manual(values = c(
+    "air yards (%)" = "turquoise4",
+    "yac (%)" = "darkseagreen"
+  )) + scale_x_discrete(drop = FALSE) + coord_flip() + nfl_theme
+
+```
+
+## Trends in Passing Percentage to Offensive Yards
+
+```{r}
+library(patchwork)
+
+# ================================
+# PREPARE SUMMARY DATA
+# ================================
+pass_imp <- pbp_2024 %>% 
+  filter(play_type %in% c("pass","run")) %>%
+  group_by(posteam) %>%
+  summarise(
+    total_plays = n(),
+    total_yards = sum(yards_gained, na.rm=TRUE),
+    pass_pct = mean(play_type == "pass") * 100,
+    .groups = "drop"
+  )
+
+pass_2000 <- pbp_2000 %>% 
+  filter(play_type %in% c("pass","run")) %>%
+  group_by(posteam) %>%
+  summarise(
+    total_plays = n(),
+    total_yards = sum(yards_gained, na.rm=TRUE),
+    pass_pct = mean(play_type == "pass") * 100,
+    .groups = "drop"
+  )
+
+# ================================
+# CORRELATIONS
+# ================================
+cor_2000 <- cor(pass_2000$pass_pct, pass_2000$total_yards, use="complete.obs")
+cor_2024 <- cor(pass_imp$pass_pct, pass_imp$total_yards, use="complete.obs")
+
+# ================================
+# AXIS LIMITS
+# ================================
+x_limits <- range(c(pass_imp$pass_pct, pass_2000$pass_pct))
+y_limits <- range(c(pass_imp$total_yards, pass_2000$total_yards))
+
+# Offset text position inside the plot
+label_x_2000 <- max(pass_2000$pass_pct) * 0.97
+label_y_2000 <- max(pass_2000$total_yards) * 0.97
+
+label_x_2024 <- max(pass_imp$pass_pct) * 0.97
+label_y_2024 <- max(pass_imp$total_yards) * 0.97
+
+# ================================
+# 2000 PLOT
+# ================================
+g_2000_all <- ggplot(pass_2000, aes(pass_pct, total_yards)) +
+  geom_nfl_logos(aes(team_abbr = posteam), width = .035) +
+  geom_smooth(
+    data = pass_2000,
+    aes(pass_pct, total_yards),
+    method = "lm", se = FALSE, 
+    inherit.aes = FALSE,
+    color = "blue", linewidth = 0.9, linetype = "dashed"
+  ) +
+  geom_text_repel(aes(label = posteam), size = 2.5) +
+  annotate("text",
+           x = label_x_2000, y = label_y_2000,
+           label = paste0("r = ", round(cor_2000, 3)),
+           size = 5, fontface = "italic", hjust = 1, vjust = 1) +
+  coord_cartesian(xlim = x_limits, ylim = y_limits) +
+  theme_minimal() +
+  labs(
+    title = "2000 Season",
+    x = "Pass %",
+    y = "Total Yards"
+  )
+
+# ================================
+# 2024 PLOT
+# ================================
+g_2024_all <- ggplot(pass_imp, aes(pass_pct, total_yards)) +
+  geom_nfl_logos(aes(team_abbr = posteam), width = .035) +
+  geom_smooth(
+    data = pass_imp,
+    aes(pass_pct, total_yards),
+    method = "lm", se = FALSE, 
+    inherit.aes = FALSE,
+    color = "blue", linewidth = 0.9, linetype = "dashed"
+  ) +
+  geom_text_repel(aes(label = posteam), size = 2.5) +
+  annotate("text",
+           x = label_x_2024, y = label_y_2024,
+           label = paste0("r = ", round(cor_2024, 3)),
+           size = 5, fontface = "italic", hjust = 1, vjust = 1) +
+  coord_cartesian(xlim = x_limits, ylim = y_limits) +
+  theme_minimal() +
+  labs(
+    title = "2024 Season",
+    x = "Pass %",
+    y = "Total Yards"
+  )
+
+# ================================
+# COMBINED
+# ================================
+combined_plots <- (g_2000_all | g_2024_all) +
+  plot_annotation(
+    title = "Passing Percentage vs. Offensive Yards Gained",
+    subtitle = "2000 vs 2024",
+    theme = theme(
+      plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+      plot.subtitle = element_text(size = 12, hjust = 0.5, color = "gray40")
+    )
+  )
+
+combined_plots
+
+```
+
+## Secondary Data: College Football
+```{r}
+library(DBI)
+library(RSQLite)
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(patchwork)
+
+# ===============================================
+# CONNECT TO SQLITE
+# ===============================================
+con <- dbConnect(RSQLite::SQLite(), "sec_data.sqlite")
+
+# ===============================================
+# TEAM COLORS
+# ===============================================
+sec_colors <- data.frame(
+  pos_team = c("Alabama","Arkansas","Auburn","Florida","Georgia",
+               "Kentucky","LSU","Mississippi State","Missouri","Ole Miss",
+               "Oklahoma","South Carolina","Tennessee","Texas","Texas A&M","Vanderbilt"),
+  primary = c("#9E1B32","#9D2235","#0C2340","#0021A5","#BA0C2F",
+              "#0033A0","#461D7C","#5D1725","#F1B82D","#CE1126",
+              "#841617","#73000A","#FF8200","#BF5700","#500000","#866D4B")
+)
+
+# ===============================================
+# 2000 DATA
+# ===============================================
+pass_cfb_2000 <- data.frame(
+  pos_team = c("Alabama","Arkansas","Auburn","Florida","Georgia",
+               "Kentucky","LSU","Mississippi State","Missouri","Ole Miss",
+               "Oklahoma","South Carolina","Tennessee","Texas","Texas A&M","Vanderbilt"),
+  total_plays = c(910,885,903,940,899,870,915,860,905,920,
+                  930,875,880,945,890,840),
+  total_yards = c(5450,5010,4980,5520,5200,4600,5100,4750,4990,5150,
+                  5300,4900,4950,5600,4850,4200),
+  pass_attempts = c(420,410,390,470,405,350,380,365,395,430,
+                    440,370,360,480,355,300)
+)
+
+# ===============================================
+# 2024 DATA
+# ===============================================
+pass_cfb_2024 <- data.frame(
+  pos_team = c("Texas","Ole Miss","Georgia","Tennessee","Alabama",
+               "LSU","South Carolina","Missouri","Texas A&M","Oklahoma",
+               "Arkansas","Florida","Auburn","Vanderbilt","Kentucky","Mississippi State"),
+  total_plays = c(1026,1068,1012,1047,1004,982,991,1032,987,984,
+                  1018,982,956,1001,951,1042),
+  total_yards = c(6889,6985,6234,6512,6345,6123,5923,6178,5834,5456,
+                  5678,5234,5012,5567,4989,5123),
+  pass_attempts = c(512,598,478,523,534,489,478,512,456,523,
+                    478,489,445,512,423,534)
+)
+
+# ===============================================
+# WRITE TABLES TO SQLITE
+# ===============================================
+dbWriteTable(con, "sec_colors", sec_colors, overwrite = TRUE)
+dbWriteTable(con, "pass_cfb_2000", pass_cfb_2000, overwrite = TRUE)
+dbWriteTable(con, "pass_cfb_2024", pass_cfb_2024, overwrite = TRUE)
+
+# ===============================================
+# DROP VIEWS (NO PRINT OUTPUT)
+# ===============================================
+invisible(dbExecute(con, "DROP VIEW IF EXISTS sec2000;"))
+invisible(dbExecute(con, "DROP VIEW IF EXISTS sec2024;"))
+
+# ===============================================
+# CREATE SQL VIEW — 2000
+# ===============================================
+invisible(dbExecute(con, "
+  CREATE VIEW sec2000 AS
+  SELECT 
+    p.pos_team,
+    p.total_plays,
+    p.total_yards,
+    CAST(p.pass_attempts AS REAL) * 100.0 / p.total_plays AS pass_pct,
+    c.\"primary\" AS primary_color
+  FROM pass_cfb_2000 p
+  LEFT JOIN sec_colors c USING (pos_team);
+"))
+
+# ===============================================
+# CREATE SQL VIEW — 2024
+# ===============================================
+invisible(dbExecute(con, "
+  CREATE VIEW sec2024 AS
+  SELECT 
+    p.pos_team,
+    p.total_plays,
+    p.total_yards,
+    CAST(p.pass_attempts AS REAL) * 100.0 / p.total_plays AS pass_pct,
+    c.\"primary\" AS primary_color
+  FROM pass_cfb_2024 p
+  LEFT JOIN sec_colors c USING (pos_team);
+"))
+
+# ===============================================
+# READ BACK OUT OF SQLITE
+# ===============================================
+sec2000 <- tbl(con, "sec2000") %>% collect()
+sec2024 <- tbl(con, "sec2024") %>% collect()
+
+# ===============================================
+# CORRELATIONS
+# ===============================================
+cor_2000 <- cor(sec2000$pass_pct, sec2000$total_yards)
+cor_2024 <- cor(sec2024$pass_pct, sec2024$total_yards)
+
+# ===============================================
+# AXIS LIMITS (SHARED)
+# ===============================================
+x_limits <- range(c(sec2000$pass_pct, sec2024$pass_pct)) + c(-2, 2)
+y_limits <- range(c(sec2000$total_yards, sec2024$total_yards)) + c(-200, 200)
+
+# ===============================================
+# PLOT — 2000
+# ===============================================
+g_2000 <- ggplot(sec2000, aes(pass_pct, total_yards)) +
+  geom_smooth(method="lm", se=FALSE, color="blue", linetype="dashed") +
+  geom_point(aes(fill=primary_color), shape=21, size=5, stroke=1.5, color="white") +
+  geom_text_repel(aes(label=pos_team), size=2.5) +
+  annotate("text",
+           x=max(sec2000$pass_pct)*0.97,
+           y=max(sec2000$total_yards)*0.97,
+           label=paste0("r = ", round(cor_2000,3)),
+           hjust=1, vjust=10, size=4, fontface="italic") +
+  scale_fill_identity() +
+  coord_cartesian(xlim=x_limits, ylim=y_limits) +
+  theme_minimal() +
+  labs(title="2000 Season", x="Pass %", y="Total Yards")
+
+# ===============================================
+# PLOT — 2024
+# ===============================================
+g_2024 <- ggplot(sec2024, aes(pass_pct, total_yards)) +
+  geom_smooth(method="lm", se=FALSE, color="blue", linetype="dashed") +
+  geom_point(aes(fill=primary_color), shape=21, size=5, stroke=1.5, color="white") +
+  geom_text_repel(aes(label=pos_team), size=2.5) +
+  annotate("text",
+           x=max(sec2024$pass_pct)*0.97,
+           y=max(sec2024$total_yards)*0.97,
+           label=paste0("r = ", round(cor_2024,3)),
+           hjust=0.6, vjust=1, size=4, fontface="italic") +
+  scale_fill_identity() +
+  coord_cartesian(xlim=x_limits, ylim=y_limits) +
+  theme_minimal() +
+  labs(title="2024 Season", x="Pass %", y="Total Yards")
+
+# ===============================================
+# COMBINED PLOT — 2000 vs 2024
+# ===============================================
+(g_2000 | g_2024) +
+  plot_annotation(
+    title = "SEC Passing Percentage vs Total Offensive Yards",
+    subtitle = "2000 vs 2024",
+    theme = theme(
+      plot.title = element_text(face="bold", size=18, hjust=0.5),
+      plot.subtitle = element_text(size=12, hjust=0.5, color="gray40")
+    )
+  )
+
+```
+
+## Killer Plot
+
+```{r}
+#| label: setup
+#| include: false
+#| context: setup
+
+library(shiny)
+library(grid)
+library(ggplot2)
+library(dplyr)
+library(DBI)      # if you're using dbConnect/dbGetQuery
+# library(RSQLite) # if needed for your db
+
+
+query_drive_starts <- "
+SELECT
+  season,
+  game_id,
+  drive,
+  posteam,
+  drive_start_yard_line
+FROM play_by_play
+WHERE season BETWEEN 2000 AND 2025
+  AND drive_start_yard_line IS NOT NULL
+  AND posteam IS NOT NULL
+GROUP BY season, game_id, drive, posteam, drive_start_yard_line
+"
+
+drive_starts <- dbGetQuery(dcon, query_drive_starts)
+
+parts      <- strsplit(drive_starts$drive_start_yard_line, ' ')
+start_team <- sapply(parts, `[`, 1)
+start_yard <- as.numeric(sapply(parts, `[`, 2))
+
+drive_starts$start_from_own <- ifelse(
+  start_team == drive_starts$posteam,
+  start_yard,
+  100 - start_yard
+)
+
+start_summary <- drive_starts %>%
+  dplyr::group_by(season) %>%
+  dplyr::summarise(
+    median_start_from_own = median(start_from_own, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+fg <- pbp %>%
+  dplyr::filter(
+    play_type == "field_goal",
+    field_goal_result %in% c("made", "missed"),
+    !is.na(kick_distance)
+  ) %>%
+  dplyr::mutate(
+    made          = if_else(field_goal_result == "made", 1L, 0L),
+    kick_distance = as.numeric(kick_distance)
+  )
+
+break_even_by_season <- fg %>%
+  dplyr::filter(kick_distance >= 20, kick_distance <= 65) %>%
+  dplyr::group_by(season) %>%
+  dplyr::group_modify(~{
+    df <- .
+
+    if (nrow(df) < 40) {
+      return(tibble(break_even_yards = NA_real_))
+    }
+
+    target_prob  <- 0.7
+    logit_target <- log(target_prob / (1 - target_prob))
+
+    mod   <- glm(made ~ kick_distance, data = df, family = binomial)
+    coefs <- coef(mod)
+
+    if (length(coefs) < 2 || coefs[2] == 0) {
+      return(tibble(break_even_yards = NA_real_))
+    }
+
+    be <- (logit_target - coefs[1]) / coefs[2]
+
+    tibble(break_even_yards = as.numeric(be))
+  }) %>%
+  dplyr::ungroup()
+
+fg_frontier <- break_even_by_season %>%
+  dplyr::filter(!is.na(break_even_yards)) %>%
+  dplyr::mutate(
+    yardline_100              = break_even_yards - 17,
+    scoring_frontier_from_own = 100 - yardline_100
+  ) %>%
+  dplyr::select(season, scoring_frontier_from_own)
+
+field_metrics <- start_summary %>%
+  dplyr::inner_join(fg_frontier, by = "season") %>%
+  dplyr::mutate(
+    effective_field_yards = scoring_frontier_from_own - median_start_from_own
+  ) %>%
+  dplyr::arrange(season)
+
+efficiency_by_season <- pbp %>%
+  dplyr::filter(
+    season >= 2000, season <= 2025,
+    play_type %in% c("run", "pass"),
+    !is.na(yards_gained)
+  ) %>%
+  dplyr::group_by(season) %>%
+  dplyr::summarise(
+    yards_per_play = mean(yards_gained),
+    .groups = "drop"
+  )
+
+field_metrics_with_plays <- field_metrics %>%
+  dplyr::left_join(efficiency_by_season, by = "season") %>%
+  dplyr::mutate(
+    effective_plays = effective_field_yards / yards_per_play
+  ) %>%
+  dplyr::arrange(season)
+
+
+plot_single_field <- function(field_metrics_with_plays, season_selected, show_title = TRUE, viewport_parent = NULL) {
+  df <- field_metrics_with_plays %>%
+    filter(season == season_selected)
+
+  if (nrow(df) == 0) stop("no data for that season")
+
+  ypp_2000 <- field_metrics_with_plays %>% 
+    filter(season == 2000) %>% 
+    pull(yards_per_play) %>% 
+    first()
+
+  df <- df %>%
+    mutate(
+      scale_factor    = ypp_2000 / yards_per_play,
+      mid_y           = 50,
+      own_ez_left_y   = -10,
+      opp_ez_right_y  = 110,
+      own_ez_left_x   = scale_factor * (own_ez_left_y  - mid_y),
+      opp_ez_right_x  = scale_factor * (opp_ez_right_y - mid_y),
+      start_x         = scale_factor * (median_start_from_own     - mid_y),
+      end_x           = scale_factor * (scoring_frontier_from_own - mid_y),
+      field_len_scaled = opp_ez_right_x - own_ez_left_x,
+      eff_width_scaled = end_x - start_x
+    )
+
+  all_x <- field_metrics_with_plays %>%
+    mutate(
+      scale_factor   = ypp_2000 / yards_per_play,
+      mid_y          = 50,
+      own_ez_left_x  = scale_factor * (-10  - mid_y),
+      opp_ez_right_x = scale_factor * (110 - mid_y)
+    )
+  x_min <- min(all_x$own_ez_left_x,  na.rm = TRUE)
+  x_max <- max(all_x$opp_ez_right_x, na.rm = TRUE)
+
+  eff_field_range <- range(field_metrics_with_plays$effective_field_yards, na.rm = TRUE)
+  color_val <- (df$effective_field_yards - eff_field_range[1]) / 
+               (eff_field_range[2] - eff_field_range[1])
+
+  r <- 1.0
+  g <- 0.84 + (0.55 - 0.84) * (1 - color_val)
+  b <- 0.0
+  fill_color <- rgb(r, g, b)
+
+  if (!is.null(viewport_parent)) {
+    grid::pushViewport(viewport_parent)
+  }
+
+  grid::pushViewport(grid::viewport(
+    xscale = c(x_min, x_max),
+    yscale = c(0, 1)
+  ))
+
+  field_y_center <- 0.5
+  field_height   <- 0.65
+
+  # full field
+  grid::grid.rect(
+    x     = grid::unit(df$own_ez_left_x, "native"),
+    y     = grid::unit(field_y_center, "native"),
+    width = grid::unit(df$field_len_scaled, "native"),
+    height= grid::unit(field_height, "native"),
+    just  = "left",
+    gp    = grid::gpar(fill = "#25a503", col = NA)
+  )
+
+  # endzones
+  ez_w <- 10 * df$scale_factor
+  grid::grid.rect(
+    x     = grid::unit(df$own_ez_left_x, "native"),
+    y     = grid::unit(field_y_center, "native"),
+    width = grid::unit(ez_w, "native"),
+    height= grid::unit(field_height, "native"),
+    just  = "left",
+    gp    = grid::gpar(fill = "#1E90FF", col = NA)
+  )
+  grid::grid.rect(
+    x     = grid::unit(df$opp_ez_right_x, "native"),
+    y     = grid::unit(field_y_center, "native"),
+    width = grid::unit(ez_w, "native"),
+    height= grid::unit(field_height, "native"),
+    just  = "right",
+    gp    = grid::gpar(fill = "#FF2C2C", col = NA)
+  )
+
+  # yard lines
+  for (y_raw in seq(0, 100, 10)) {
+    x_tick <- df$scale_factor * (y_raw - df$mid_y)
+    grid::grid.lines(
+      x  = grid::unit(c(x_tick, x_tick), "native"),
+      y  = grid::unit(c(0.17, 0.83), "native"),
+      gp = grid::gpar(col = "white", lwd = 5)
+    )
+  }
+
+  # effective field
+  grid::grid.rect(
+    x     = grid::unit((df$start_x + df$end_x) / 2, "native"),
+    y     = grid::unit(field_y_center, "native"),
+    width = grid::unit(df$eff_width_scaled, "native"),
+    height= grid::unit(field_height, "native"),
+    gp    = grid::gpar(fill = fill_color, col = "black", lwd = 2, alpha = 0.75)
+  )
+
+  grid::grid.lines(
+    x  = grid::unit(c(df$start_x, df$start_x), "native"),
+    y  = grid::unit(c(0.17, 0.83), "native"),
+    gp = grid::gpar(col = "black", lwd = 1.5, lty = 2)
+  )
+  grid::grid.lines(
+    x  = grid::unit(c(df$end_x, df$end_x), "native"),
+    y  = grid::unit(c(0.17, 0.83), "native"),
+    gp = grid::gpar(col = "black", lwd = 1.5, lty = 2)
+  )
+
+    grid.text(
+    sprintf("Median Start: Own %.1f yd", df$median_start_from_own),
+    x = unit(0.02, "npc"), y = unit(0.88, "npc"),
+    just = "left",
+    gp = gpar(fontsize = 20, col = "gray20")
+  )
+  grid.text(
+    sprintf("FG Frontier (70%%): Own %.1f yd", df$scoring_frontier_from_own),
+    x = unit(0.98, "npc"), y = unit(0.88, "npc"),
+    just = "right",
+    gp = gpar(fontsize = 20, col = "gray20")
+  )
+  
+  # bottom info
+  grid.text(
+    sprintf("YPP: %.2f  |  Effective Field: %.1f yds  |  Effective Plays: %.1f",
+            df$yards_per_play, df$effective_field_yards, df$effective_plays),
+    x = unit(0.5, "npc"), y = unit(0.06, "npc"),
+    gp = gpar(fontsize = 20, col = "gray30")
+  )
+  
+  grid.text(
+    "Field scaled by offensive efficiency (yards per play) relative to 2000 baseline",
+    x = unit(0.5, "npc"), y = unit(0.01, "npc"),
+    gp = gpar(fontsize = 10, col = "gray50", fontface = "italic")
+  )
+
+  grid::upViewport()
+  if (!is.null(viewport_parent)) {
+    grid::upViewport()
+  }
+}
+
+plot_comparison <- function(field_metrics_with_plays, season1, season2) {
+  grid::grid.newpage()
+  vp_layout <- grid::viewport(layout = grid::grid.layout(2, 1))
+  grid::pushViewport(vp_layout)
+
+  vp1 <- grid::viewport(layout.pos.row = 1, layout.pos.col = 1)
+  plot_single_field(field_metrics_with_plays, season1, show_title = FALSE, viewport_parent = vp1)
+
+  vp2 <- grid::viewport(layout.pos.row = 2, layout.pos.col = 1)
+  plot_single_field(field_metrics_with_plays, season2, show_title = FALSE, viewport_parent = vp2)
+
+  grid::upViewport()
+}
+```
+
+
+
+
+
+
+
+
+```{r}
+#| label: server
+#| context: server
+
+output$field_plot <- renderPlot({
+  grid::grid.newpage()
+  plot_single_field(field_metrics_with_plays, input$season)
+})
+
+output$timeseries_plot <- renderPlot({
+  ggplot(field_metrics_with_plays, aes(x = season, y = effective_plays)) +
+    geom_line(color = "steelblue", size = 1.2) +
+    geom_point(data = field_metrics_with_plays %>% filter(season != input$season),
+               color = "steelblue", size = 2.5, alpha = 0.6) +
+    geom_point(data = field_metrics_with_plays %>% filter(season == input$season),
+               color = "red", size = 5, shape = 19) +
+    geom_point(data = field_metrics_with_plays %>% filter(season == input$season),
+               color = "red", size = 7, shape = 1, stroke = 2) +
+    labs(
+      title = "Effective Plays to Cross Field Over Time",
+      subtitle = "Effective Field (yards) ÷ Yards Per Play",
+      x = "Season",
+      y = "Plays Required"
+    ) +
+    theme_minimal(base_size = 14) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+      plot.subtitle = element_text(hjust = 0.5, color = "gray40", size = 12),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_blank(),
+      axis.title = element_text(face = "bold")
+    ) +
+    scale_x_continuous(breaks = seq(2000, 2025, 5))
+})
+
+output$comparison_plot <- renderPlot({
+  plot_comparison(
+    field_metrics_with_plays,
+    as.numeric(input$compare_season1),
+    as.numeric(input$compare_season2)
+  )
+})
+```
+
+## NFL Effective Field By Season
+
+```{r}
+#| echo: false
+div(
+  style = "display:flex; justify-content:center;",
+  sliderInput(
+    "season", label = NULL,
+    min = 2000, max = 2025, value = 2000,
+    step = 1, sep = "", width = "60%"
+  )
+)
+
+plotOutput("field_plot", height = "350px", width = "100%")
+
+div(
+  style = "display:flex; justify-content:center;",
+  plotOutput("timeseries_plot", height = "250px", width = "70%")
+)
+```
+
+## NFL Effective Field: Comparing Two Seasons
+
+```{r}
+#| echo: false
+
+div(
+  style = "display:flex; justify-content:center; gap:40px; font-size:0.8em;",
+  
+  selectInput(
+    "compare_season1", "Season 1:",
+    choices = 2000:2025, selected = 2000,
+    width = "140px"
+  ),
+  
+  selectInput(
+    "compare_season2", "Season 2:",
+    choices = 2000:2025, selected = 2025,
+    width = "140px"
+  )
+)
+
+div(
+  style = "display:flex; justify-content:center;",
+  plotOutput("comparison_plot", height = "450px", width = "90%")
+)
+```
+
+
+
+## Takeaways
+::: incremental
+-   Offenses are becoming more efficient as offensive strategy develops
+-   The passing game is becoming more diverse as offenses use different types of passing plays to 
+exploit defensive strategy
+-   Some change occurs organically, however, the NFL still injects some regulated change into the game through
+their new kicking regulations and the new kickoff rule
+:::
+
+
+
+
+
+
+
